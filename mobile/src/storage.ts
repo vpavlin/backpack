@@ -43,6 +43,7 @@ export function init(sprs: string[]): Promise<string> {
   if (!LS) return Promise.reject(new Error("Logos Storage isn't in this build (arm64 phones only)"));
   const run = queue.then(async () => {
     if (ctx) return ctx;
+    diag("init: setup");
     await LS.setup();
     // Storage is only a cache here, and a data dir left by a download that was cut short (app killed,
     // crash) makes the next download hang (reproduced on desktop with the same libstorage commit).
@@ -52,11 +53,13 @@ export function init(sprs: string[]): Promise<string> {
     const nodes = sprs.filter(Boolean);
     const cfg: Record<string, unknown> = { "log-level": "WARN", "data-dir": dir };
     if (nodes.length) cfg["bootstrap-node"] = nodes; else cfg.network = "logos.test";
+    diag(`init: newNode (bootstrap ${nodes.length})`);
     const c = (await LS.newNode(JSON.stringify(cfg))) as string;
     if (!c || c === "0") throw new Error("Storage node didn't start");
     // A start that fails leaves a node that must never be started again (libstorage aborts on a
     // second start): destroy it, so the next attempt creates a fresh one.
-    try { await LS.start(c); }
+    diag("init: start");
+    try { await LS.start(c); diag("init: started"); }
     catch (e) { for (const f of ["stop", "close", "destroy"]) { try { await LS[f](c); } catch { /* */ } } throw e; }
     ctx = c;
     return c;
@@ -66,6 +69,36 @@ export function init(sprs: string[]): Promise<string> {
 }
 
 export async function filesDir(): Promise<string> { return LS.filesDir(); }
+
+// ── diagnostics: what the node is doing, readable while a fetch is stuck ──────
+export interface DiagLine { t: number; text: string }
+const diagLog: DiagLine[] = [];
+const diagListeners = new Set<() => void>();
+const t0 = Date.now();
+export function diag(text: string) {
+  diagLog.push({ t: Date.now(), text });
+  if (diagLog.length > 200) diagLog.shift();
+  diagListeners.forEach((l) => l());
+}
+export function diagLines(): DiagLine[] { return [...diagLog]; }
+export function onDiag(l: () => void): () => void { diagListeners.add(l); return () => diagListeners.delete(l); }
+export function diagText(): string {
+  return diagLog.map((d) => `+${((d.t - t0) / 1000).toFixed(1)}s ${d.text}`).join("\n");
+}
+/** The node's own view (peers, addresses, table) — runs on a separate native thread, never blocked by a fetch. */
+export async function nodeDebug(): Promise<string> {
+  if (!ctx || !NATIVE) return "node not started";
+  try { return await NATIVE.debug(ctx); } catch (e: any) { return "debug failed: " + (e?.message ?? e); }
+}
+/** One-line summary of nodeDebug: own id, addresses, how many peers the DHT table knows. */
+export async function nodeSummary(): Promise<string> {
+  const raw = await nodeDebug();
+  try {
+    const j = JSON.parse(raw);
+    const n = j?.table?.nodes?.length ?? "?";
+    return `node ${String(j.id ?? "").slice(-8)} addrs ${JSON.stringify(j.addrs ?? [])} table ${n}`;
+  } catch { return raw.slice(0, 300); }
+}
 export async function fileSize(path: string): Promise<number> { try { return Number(await LS.fileSize(path)); } catch { return -1; } }
 
 
@@ -77,16 +110,19 @@ export async function fileSize(path: string): Promise<number> { try { return Num
  */
 export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void): Promise<string> {
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));
-  for (const p of peers) { try { onStage?.("connecting"); await LS.connect(c, p.peerId, p.addrs); } catch { /* try the others */ } }
+  for (const p of peers) {
+    try { onStage?.("connecting"); diag(`connect ${p.peerId.slice(-8)} ${p.addrs.join(",")}`); await LS.connect(c, p.peerId, p.addrs); diag("connect ok"); }
+    catch (e: any) { diag(`connect FAILED: ${e?.message ?? e}`); }
+  }
   // fetch pulls the blocks into the local store; download_stream alone (local=false) only gets the
   // manifest and then waits forever (verified on desktop). Scala's prebuilt arm64 libstorage crashed
   // inside fetch (SEGV on the phone and under arm64 translation); the library is now built fresh.
   for (let i = 1; ; i++) {
-    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); await LS.fetch(c, cid); break; }
-    catch (e) { if (!isTimeout(e) || i >= 3) throw e; }
+    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await LS.fetch(c, cid); diag(`fetch ok ${String(m).slice(0, 120)}`); break; }
+    catch (e: any) { diag(`fetch error: ${e?.message ?? e}`); if (!isTimeout(e) || i >= 3) throw e; }
   }
   for (let i = 1; ; i++) {
-    try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); return await LS.downloadToFile(c, cid, 65536, false, path); }
-    catch (e) { if (!isTimeout(e) || i >= 5) throw e; }
+    try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); diag(`download ${cid.slice(-10)} try ${i}`); const r = await LS.downloadToFile(c, cid, 65536, false, path); diag(`download ok (${await fileSize(path)} B)`); return r; }
+    catch (e: any) { diag(`download error: ${e?.message ?? e}`); if (!isTimeout(e) || i >= 5) throw e; }
   }
 }

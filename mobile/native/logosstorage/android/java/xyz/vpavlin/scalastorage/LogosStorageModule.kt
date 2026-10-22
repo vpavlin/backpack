@@ -31,6 +31,10 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     private val storageThread: java.util.concurrent.ExecutorService =
       java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(null, r, "logos-storage", 16L shl 20) }
     fun onStorageThread(block: () -> Unit) { storageThread.execute(block) }
+    // Diagnostics (debug/spr) get their own long-lived thread, so a fetch blocked on the storage
+    // thread can't hide what the node is doing. Registered with Nim once, like the storage thread.
+    private val diagThread: java.util.concurrent.ExecutorService =
+      java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(null, r, "logos-storage-diag", 16L shl 20) }
 
     // Lazy (on setup()) so merely registering the module on a non-arm64 build (x86_64 emulator,
     // which ships no libstorage.so) does NOT crash at startup — the error surfaces only if used.
@@ -108,7 +112,14 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod fun close(ctx: String, promise: Promise) = bg(promise, "storage_close") { storageClose(BigInteger(ctx).toLong()) }
   @ReactMethod fun destroy(ctx: String, promise: Promise) = bg(promise, "storage_destroy") { storageDestroy(BigInteger(ctx).toLong()) }
   @ReactMethod fun spr(ctx: String, promise: Promise) = bg(promise, "storage_spr") { storageSpr(BigInteger(ctx).toLong()) }
-  @ReactMethod fun debug(ctx: String, promise: Promise) = bg(promise, "storage_debug") { storageDebug(BigInteger(ctx).toLong()) }
+  @ReactMethod fun debug(ctx: String, promise: Promise) {
+    diagThread.execute {
+      try {
+        val o = JSONObject(storageDebug(BigInteger(ctx).toLong()))
+        if (o.optBoolean("ok", false)) promise.resolve(o.optString("msg", "")) else promise.reject("storage_debug", o.optString("err", "storage error"))
+      } catch (t: Throwable) { promise.reject("storage_debug", t.message ?: "debug failed") }
+    }
+  }
   @ReactMethod fun exists(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_exists") { storageExists(BigInteger(ctx).toLong(), cid) }
   @ReactMethod fun fetch(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_fetch") { storageFetch(BigInteger(ctx).toLong(), cid) }
 

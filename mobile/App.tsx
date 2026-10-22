@@ -23,6 +23,17 @@ function Main() {
   const [installed, setInstalled] = useState<Record<string, number>>({});
   const [stage, setStage] = useState<Record<string, string>>({}); // app id → install stage
   const [icons, setIcons] = useState<Record<string, string>>({});
+  const [showDiag, setShowDiag] = useState(false);
+  const [diagTick, setDiagTick] = useState(0);
+  const [nodeLine, setNodeLine] = useState("");
+  useEffect(() => storage.onDiag(() => setDiagTick((t) => t + 1)), []);
+  useEffect(() => {
+    if (!showDiag) return;
+    let live = true;
+    const poll = async () => { const l = await storage.nodeSummary(); if (live) setNodeLine(l); };
+    poll(); const iv = setInterval(poll, 5000);
+    return () => { live = false; clearInterval(iv); };
+  }, [showDiag]);
 
   const scanInstalled = useCallback(async (rs: R.Repo[]) => {
     if (!R.installer.available()) return;
@@ -94,9 +105,22 @@ function Main() {
     <SafeAreaView style={s.root} edges={["top", "bottom"]}>
       <View style={s.head}>
         <Text style={s.title}>🎒 Backpack</Text>
+        <Pressable onPress={() => setShowDiag((d) => !d)} style={[s.headBtn, { marginRight: 8 }]}><Text style={s.headBtnT}>{showDiag ? "Hide log" : "Log"}</Text></Pressable>
         <Pressable onPress={() => setAdding((a) => !a)} style={s.headBtn}><Text style={s.headBtnT}>{adding ? "Close" : "+ Repo"}</Text></Pressable>
       </View>
       {!storage.available() && <Text style={[s.banner, { color: C.err }]}>Logos Storage isn't in this build — Backpack needs an arm64 phone.</Text>}
+      {showDiag && (
+        <View style={[s.card, { maxHeight: 320 }]}>
+          <View style={s.row}>
+            <Text style={[s.label, { flex: 1 }]}>Storage log</Text>
+            <Pressable style={s.btnGhost} onPress={async () => { await Clipboard.setStringAsync(`${storage.diagText()}\n\n${await storage.nodeDebug()}`); Alert.alert("Copied", "The log and the node's state are on the clipboard."); }}><Text style={s.btnGhostT}>Copy</Text></Pressable>
+          </View>
+          <Text style={[s.hint, { fontFamily: "monospace", fontSize: 11 }]} numberOfLines={3}>{nodeLine || "node: …"}</Text>
+          <ScrollView key={diagTick}>
+            <Text style={[s.hint, { fontFamily: "monospace", fontSize: 11 }]}>{storage.diagText() || "nothing yet"}</Text>
+          </ScrollView>
+        </View>
+      )}
       {busy && <View style={s.busy}><ActivityIndicator color={C.accent} size="small" /><Text style={s.busyT}>{busy}</Text></View>}
 
       {adding && (

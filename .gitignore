@@ -3,3 +3,4 @@ mobile/android/
 mobile/.expo/
 *.so
 probe/phonepath
+*.apk
