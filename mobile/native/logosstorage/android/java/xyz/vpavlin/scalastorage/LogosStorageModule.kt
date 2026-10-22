@@ -24,6 +24,14 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     @Volatile private var libsLoaded = false
     @Volatile private var nimStarted = false  // libstorageNimMain must run exactly once per process
 
+    // EVERY libstorage call runs on this one long-lived thread with a big stack. Each libstorage entry
+    // point calls initializeLibrary(), which registers the calling thread with Nim's GC (refc on
+    // Android). A fresh Java thread per call left a trail of exited-but-registered threads, and the
+    // phone crashed (SEGV_ACCERR) inside the 7th call, fetch. One thread, registered once, can't.
+    private val storageThread: java.util.concurrent.ExecutorService =
+      java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(null, r, "logos-storage", 16L shl 20) }
+    fun onStorageThread(block: () -> Unit) { storageThread.execute(block) }
+
     // Lazy (on setup()) so merely registering the module on a non-arm64 build (x86_64 emulator,
     // which ships no libstorage.so) does NOT crash at startup — the error surfaces only if used.
     @Synchronized
@@ -56,7 +64,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
 
   // Run a blocking native call off the RN queue; resolve msg / reject err from the JSON result.
   private fun bg(promise: Promise, tag: String, block: () -> String) {
-    Thread {
+    onStorageThread {
       try {
         val o = JSONObject(block())
         if (o.optBoolean("ok", false)) promise.resolve(o.optString("msg", ""))
@@ -64,7 +72,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
       } catch (t: Throwable) {
         promise.reject(tag, t.message ?: "storage call failed")
       }
-    }.start()
+    }
   }
 
   @ReactMethod
@@ -72,19 +80,21 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     try { ensureLibsLoaded() } catch (t: Throwable) {
       promise.reject("loadlib", "Logos Storage native library unavailable: ${t.message}"); return
     }
-    synchronized(LogosStorageModule::class.java) { if (!nimStarted) { storageSetup(); nimStarted = true } }
-    promise.resolve(null)
+    onStorageThread {
+      try { if (!nimStarted) { storageSetup(); nimStarted = true }; promise.resolve(null) }
+      catch (t: Throwable) { promise.reject("setup", t.message ?: "setup failed") }
+    }
   }
 
   @ReactMethod
   fun newNode(configJson: String, promise: Promise) {
-    Thread {
+    onStorageThread {
       try {
         val ptr = storageNew(configJson)
         if (ptr == 0L) promise.reject("storage_new", "node creation failed (config rejected?)")
         else promise.resolve(BigInteger.valueOf(ptr).toString())
       } catch (t: Throwable) { promise.reject("storage_new", t.message ?: "storage_new failed") }
-    }.start()
+    }
   }
 
   @ReactMethod
@@ -118,17 +128,17 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
   // the JS side stays a single call.
   @ReactMethod
   fun downloadToFile(ctx: String, cid: String, chunkSize: Double, local: Boolean, filePath: String, promise: Promise) {
-    Thread {
+    onStorageThread {
       try {
         val c = BigInteger(ctx).toLong()
         java.io.File(filePath).parentFile?.mkdirs()   // native stream opens filePath for write → its dir must exist
         val init = JSONObject(storageDownloadInit(c, cid, chunkSize.toLong(), local))
         if (!init.optBoolean("ok", false)) {
-          promise.reject("storage_download_init", init.optString("err", "download init failed")); return@Thread
+          promise.reject("storage_download_init", init.optString("err", "download init failed")); return@onStorageThread
         }
         val stream = JSONObject(storageDownloadStream(c, cid, chunkSize.toLong(), local, filePath))
         if (!stream.optBoolean("ok", false)) {
-          promise.reject("storage_download_stream", stream.optString("err", "storage error")); return@Thread
+          promise.reject("storage_download_stream", stream.optString("err", "storage error")); return@onStorageThread
         }
         // Content arrives as RET_PROGRESS chunks written to filePath (not in the terminal msg), so
         // read the file back and return it (contract: resolves with the downloaded content). Cap the
@@ -139,7 +149,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
       } catch (t: Throwable) {
         promise.reject("storage_download_stream", t.message ?: "storage call failed")
       }
-    }.start()
+    }
   }
 
   // Size of a file in bytes (-1 if missing): the JS side polls a download's destination to show progress

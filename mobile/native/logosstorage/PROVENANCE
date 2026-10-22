@@ -1,9 +1,9 @@
-# Written by build-libstorage.sh — do not edit by hand.
-source      https://github.com/vpavlin/nim-codex.git @ 6af20491addbf8edaec68a1d51db5c6abe94c0c9
-nim-libp2p  391e403cc274ab8623fb1106f2c2827e09c6c89f (before patches)
-patch       nim-libp2p/0001-tcp-dial-bind-same-family.patch cccdcb3d59e71c04
-ndk         27.1.12297006
-built       2026-09-28T20:09Z
-sha256      b48c5e551b0045fa  libstorage.so
-sha256      fb0ee727cc822fdc  liblogos_storage_jni.so
-sha256      e69496a4aeb51ebe  libc++_shared.so
+# Backpack's Logos Storage libraries (arm64-v8a). NOT Scala's prebuilt libstorage.so: that one
+# (built 2026-09-28) crashes inside storage_fetch on a real phone and under arm64 translation
+# (SIGSEGV SEGV_ACCERR, 0x...020). Rebuilt 2026-10-22 from the same source, it works.
+source      ~/logos-storage-nim @ 6af20491addbf8edaec68a1d51db5c6abe94c0c9  (vpavlin/nim-codex android-fetch-client)
+nim-libp2p  391e403cc274ab8623fb1106f2c2827e09c6c89f + working-tree diff sha256 cccdcb3d59e71c04 (0001-tcp-dial-bind-same-family)
+leveldbstatic working tree:  1 file changed, 0 insertions(+), 0 deletions(-)
+build       CPU=arm64 ABIDIR=arm64-v8a-fresh ./env.sh nim libStorageAndroid build.nims  (NDK 27.1.12297006), llvm-strip --strip-debug
+sha256      ec47b6625d330a52  libstorage.so
+sha256      514668bc64409164  liblogos_storage_jni.so (build-jni.sh)

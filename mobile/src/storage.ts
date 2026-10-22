@@ -78,12 +78,15 @@ export async function fileSize(path: string): Promise<number> { try { return Num
 export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void): Promise<string> {
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));
   for (const p of peers) { try { onStage?.("connecting"); await LS.connect(c, p.peerId, p.addrs); } catch { /* try the others */ } }
+  // fetch pulls the blocks into the local store; download_stream alone (local=false) only gets the
+  // manifest and then waits forever (verified on desktop). Scala's prebuilt arm64 libstorage crashed
+  // inside fetch (SEGV on the phone and under arm64 translation); the library is now built fresh.
   for (let i = 1; ; i++) {
     try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); await LS.fetch(c, cid); break; }
-    catch (e) { if (!isTimeout(e) || i >= 15) throw e; }
+    catch (e) { if (!isTimeout(e) || i >= 3) throw e; }
   }
   for (let i = 1; ; i++) {
-    try { onStage?.("writing"); return await LS.downloadToFile(c, cid, 65536, false, path); }
+    try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); return await LS.downloadToFile(c, cid, 65536, false, path); }
     catch (e) { if (!isTimeout(e) || i >= 5) throw e; }
   }
 }
