@@ -1,0 +1,1 @@
+{ "name": "backpack-cli", "version": "0.1.0", "type": "module", "bin": { "backpack": "./backpack.mjs" }, "dependencies": { "qrcode": "^1.5.4" }, "license": "MIT OR Apache-2.0" }

@@ -1,0 +1,7 @@
+start            rc=0  (+9s)
+connect          rc=0  (+9s)
+fetch            rc=0 {"manifestVersion":0,"treeCid":"zDzSvJTfGLuM1u6HarD5Hj6YJ4U1DWw87k7f6g7woGicFUmxhjrP","blockSize":65536,"datasetSize":39323289,"
+download_init    rc=0  (+10s)
+download_stream  rc=0  (+24s)
+42c5173f8775664ca745a6fd80d4d45b28f4b995e7d1fcfd114bb6bce8f609ad  /tmp/claude-1000/kith.apk
+42c5173f8775664ca745a6fd80d4d45b28f4b995e7d1fcfd114bb6bce8f609ad  /home/vpavlin/kith-0.1.5.apk

@@ -1,0 +1,20 @@
+<!-- Backpack mark: an amber pack on dark; the pocket carries three linked nodes (Logos Storage). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <g transform="translate(512 540)">
+    <!-- handle loop -->
+    <path d="M-110 -300 a110 110 0 0 1 220 0 v40 h-56 v-40 a54 54 0 0 0 -108 0 v40 h-56z" fill="#c98a3e"/>
+    <!-- straps behind -->
+    <rect x="-262" y="-150" width="56" height="330" rx="28" fill="#a86f2e"/>
+    <rect x="206" y="-150" width="56" height="330" rx="28" fill="#a86f2e"/>
+    <!-- body -->
+    <rect x="-230" y="-280" width="460" height="560" rx="150" fill="#e0a458"/>
+    <!-- lid -->
+    <path d="M-230 -130 q0 -150 150 -150 h160 q150 0 150 150 v20 q-230 70 -460 0z" fill="#c98a3e"/>
+    <!-- pocket -->
+    <rect x="-160" y="20" width="320" height="200" rx="60" fill="#14161a" opacity="0.9"/>
+    <g stroke="#e0a458" stroke-width="16" stroke-linecap="round">
+      <line x1="-80" y1="150" x2="0" y2="80"/><line x1="0" y1="80" x2="80" y2="150"/><line x1="-80" y1="150" x2="80" y2="150"/>
+    </g>
+    <g fill="#e0a458"><circle cx="-80" cy="150" r="26"/><circle cx="0" cy="80" r="26"/><circle cx="80" cy="150" r="26"/></g>
+  </g>
+</svg>

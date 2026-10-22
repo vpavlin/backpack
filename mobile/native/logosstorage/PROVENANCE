@@ -1,0 +1,9 @@
+# Written by build-libstorage.sh — do not edit by hand.
+source      https://github.com/vpavlin/nim-codex.git @ 6af20491addbf8edaec68a1d51db5c6abe94c0c9
+nim-libp2p  391e403cc274ab8623fb1106f2c2827e09c6c89f (before patches)
+patch       nim-libp2p/0001-tcp-dial-bind-same-family.patch cccdcb3d59e71c04
+ndk         27.1.12297006
+built       2026-09-28T20:09Z
+sha256      b48c5e551b0045fa  libstorage.so
+sha256      fb0ee727cc822fdc  liblogos_storage_jni.so
+sha256      e69496a4aeb51ebe  libc++_shared.so

@@ -1,0 +1,34 @@
+diff --git a/libp2p/transports/tcptransport.nim b/libp2p/transports/tcptransport.nim
+index 911cd0c1..d8c9005e 100644
+--- a/libp2p/transports/tcptransport.nim
++++ b/libp2p/transports/tcptransport.nim
+@@ -295,15 +295,25 @@ method dial*(
+   let ta = initTAddress(address).valueOr:
+     raise (ref TcpTransportError)(msg: "Unsupported address: " & $address)
+ 
++  # When NotReachable, outgoing dials reuse the listen port (hole punching). Bind only to a
++  # listen address of the destination's family: binding an IPv6 socket to an IPv4 address
++  # fails with EINVAL, which made every IPv6 peer undialable from an IPv4-listening node.
++  var local = Opt.none(TransportAddress)
++  if self.networkReachability == NetworkReachability.NotReachable:
++    for a in self.addrs:
++      let la = initTAddress(a).valueOr:
++        continue
++      if la.family == ta.family:
++        local = Opt.some(la)
++        break
++
+   trace "Dialing remote peer", address = $address
+   let transp =
+     try:
+       await(
+-        if self.networkReachability == NetworkReachability.NotReachable and
+-            self.addrs.len > 0:
+-          let local = initTAddress(self.addrs[0]).expect("self address is valid")
++        if local.isSome:
+           self.clientFlags.incl(SocketFlags.ReusePort)
+-          connect(ta, flags = self.clientFlags, localAddress = local)
++          connect(ta, flags = self.clientFlags, localAddress = local.get)
+         else:
+           connect(ta, flags = self.clientFlags)
+       )

@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "Backpack",
+    "slug": "backpack",
+    "scheme": "backpack",
+    "version": "0.1.0",
+    "platforms": ["android"],
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#14161a",
+    "android": {
+      "package": "xyz.vpavlin.backpack",
+      "versionCode": 1,
+      "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#14161a" },
+      "permissions": ["android.permission.INTERNET", "android.permission.REQUEST_INSTALL_PACKAGES", "android.permission.QUERY_ALL_PACKAGES"],
+      "blockedPermissions": ["android.permission.RECORD_AUDIO", "android.permission.SYSTEM_ALERT_WINDOW"]
+    },
+    "plugins": ["./plugins/withBackpackNative"]
+  }
+}

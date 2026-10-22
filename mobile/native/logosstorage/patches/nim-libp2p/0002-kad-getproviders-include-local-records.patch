@@ -1,0 +1,15 @@
+--- a/libp2p/protocols/kademlia/provider.nim
++++ b/libp2p/protocols/kademlia/provider.nim
+@@ -508,6 +508,12 @@
+   if kad.providerManager.providedKeys.provided.hasKey(key):
+     allProviders.incl(kad.switch.peerInfo.toPeer())
+ 
++  # Include the provider records other nodes stored on US (as handleGetProviders serves them).
++  # Without this a DHT server never finds providers that advertised only to it: e.g. the sole
++  # bootstrap/root of a private network, whose client-mode (NAT-ed) peers all ADD_PROVIDER to it.
++  for p in kad.providerManager.knownKeys.getOrDefault(key, initHashSet[Provider]()):
++    allProviders.incl(p)
++
+   let onReply = proc(
+       peerId: PeerId, msgOpt: Opt[Message], state: LookupState
+   ): Future[void] {.async: (raises: []), gcsafe.} =
