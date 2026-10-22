@@ -1,6 +1,9 @@
-node_modules/
+*.apk
+cli/node_modules/
 mobile/android/
 mobile/.expo/
-*.so
+node_modules/
+probe/latecb
 probe/phonepath
-*.apk
+probe/phonepath1540
+*.so

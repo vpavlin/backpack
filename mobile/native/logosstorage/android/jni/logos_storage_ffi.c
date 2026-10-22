@@ -208,7 +208,19 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_##NAME(JNIEnv *env, jobject thi
     return js;                                                                                   \
 }
 DEFINE_CID_CALL(storageExists, storage_exists)
-DEFINE_CID_CALL(storageFetch,  storage_fetch)
+// fetch (libstorage >= PR #1540): isPrivate=false, advertise=false — a fetch-only client neither
+// hides from nor advertises to the DHT.
+JNIEXPORT jstring JNICALL
+Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageFetch(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
+    (void)thiz;
+    const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
+    Resp *r = resp_alloc();
+    int accepted = storage_fetch((void *)(intptr_t)ctx, cid, false, false, (StorageCallback)storage_cb, r);
+    (*env)->ReleaseStringUTFChars(env, cidStr, cid);
+    if (accepted == RET_OK) resp_wait(r);
+    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
+    return resp_finish(env, r);
+}
 
 JNIEXPORT jstring JNICALL
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadInit(JNIEnv *env, jobject thiz,
@@ -217,7 +229,8 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadInit(JNIEnv *env
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
     Resp *r = resp_alloc();
     int accepted = storage_download_init((void *)(intptr_t)ctx, cid, (size_t)chunkSize,
-                                         local ? true : false, (StorageCallback)storage_cb, r);
+                                         local ? true : false, false /* isPrivate */, false /* advertise */,
+                                         (StorageCallback)storage_cb, r);
     (*env)->ReleaseStringUTFChars(env, cidStr, cid);
     if (accepted == RET_OK) resp_wait(r);
     else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
@@ -234,8 +247,9 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadStream(JNIEnv *e
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
     const char *path = (*env)->GetStringUTFChars(env, filePathStr, NULL);
     Resp *r = resp_alloc();
+    (void)local;   // >= PR #1540: the session made by download_init carries local/private
     int accepted = storage_download_stream((void *)(intptr_t)ctx, cid, (size_t)chunkSize,
-                                           local ? true : false, path, (StorageCallback)storage_cb, r);
+                                           path, (StorageCallback)storage_cb, r);
     (*env)->ReleaseStringUTFChars(env, cidStr, cid);
     (*env)->ReleaseStringUTFChars(env, filePathStr, path);
     if (accepted == RET_OK) resp_wait(r);

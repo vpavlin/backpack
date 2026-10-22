@@ -1,9 +1,11 @@
-# Backpack's Logos Storage libraries (arm64-v8a). NOT Scala's prebuilt libstorage.so: that one
-# (built 2026-09-28) crashes inside storage_fetch on a real phone and under arm64 translation
-# (SIGSEGV SEGV_ACCERR, 0x...020). Rebuilt 2026-10-22 from the same source, it works.
-source      ~/logos-storage-nim @ 6af20491addbf8edaec68a1d51db5c6abe94c0c9  (vpavlin/nim-codex android-fetch-client)
-nim-libp2p  391e403cc274ab8623fb1106f2c2827e09c6c89f + working-tree diff sha256 cccdcb3d59e71c04 (0001-tcp-dial-bind-same-family)
-leveldbstatic working tree:  1 file changed, 0 insertions(+), 0 deletions(-)
-build       CPU=arm64 ABIDIR=arm64-v8a-fresh ./env.sh nim libStorageAndroid build.nims  (NDK 27.1.12297006), llvm-strip --strip-debug
-sha256      ec47b6625d330a52  libstorage.so
-sha256      514668bc64409164  liblogos_storage_jni.so (build-jni.sh)
+# Backpack's Logos Storage libraries — see docs/adr/0005-phone-libstorage.md.
+source      logos-storage-nim d82d0d39 (PR #1540: download swarms from DHT providers)
+            + cherry-pick a2a353e (libStorageAndroid build task) = worktree ~/work/lsn-1540 @ 1c6b08b
+patch       patches/nim-libp2p/0001-tcp-dial-bind-same-family.patch
+build       CPU=arm64 ABIDIR=arm64-v8a ./env.sh nim libStorageAndroid build.nims  (NDK 27.1.12297006); llvm-strip --strip-debug
+            CPU=amd64 ABIDIR=x86_64 … (emulator tests only, BACKPACK_EMU=1)
+sha256      52fb905ee32c8f70  arm64-v8a/libstorage.so
+sha256      4da9105d797657e7  arm64-v8a/liblogos_storage_jni.so
+sha256      58f8df82e2f5fa4c  x86_64/libstorage.so
+history     2026-09-28 Scala's prebuilt (6af2049) crashed in storage_fetch on arm64; 2026-10-22 rebuilt
+            6af2049 (no crash, but multi-block downloads stalled); now PR #1540.

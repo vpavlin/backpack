@@ -78,6 +78,45 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
   @ReactMethod
   fun deleteFile(path: String, promise: Promise) { promise.resolve(File(path).delete()) }
 
+  // ── signing certificates (ADR 0002) ─────────────────────────────────────────
+  // SHA-256 of each signing certificate, lowercase hex — what `apksigner --print-certs` calls the
+  // "certificate SHA-256 digest". All of them (current signers + rotation history), as a JSON array;
+  // the repo's pinned signer must be among them.
+  private fun certHex(sig: android.content.pm.Signature) =
+    MessageDigest.getInstance("SHA-256").digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+
+  @Suppress("DEPRECATION")
+  private fun signersOf(pi: android.content.pm.PackageInfo?): List<String> {
+    if (pi == null) return emptyList()
+    val out = LinkedHashSet<String>()
+    if (Build.VERSION.SDK_INT >= 28) {
+      pi.signingInfo?.let { si ->
+        (if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory)?.forEach { out.add(certHex(it)) }
+      }
+    }
+    pi.signatures?.forEach { out.add(certHex(it)) }
+    return out.toList()
+  }
+  @Suppress("DEPRECATION")
+  private val sigFlags get() = if (Build.VERSION.SDK_INT >= 28) android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES else android.content.pm.PackageManager.GET_SIGNATURES
+
+  @ReactMethod
+  fun apkSigners(path: String, promise: Promise) {
+    Thread {
+      try {
+        val pi = rc.packageManager.getPackageArchiveInfo(path, sigFlags)
+        pi?.applicationInfo?.let { it.sourceDir = path; it.publicSourceDir = path }
+        promise.resolve(org.json.JSONArray(signersOf(pi)).toString())
+      } catch (t: Throwable) { promise.reject("apk_signers", t.message ?: "failed") }
+    }.start()
+  }
+
+  @ReactMethod
+  fun installedSigners(pkg: String, promise: Promise) {
+    try { promise.resolve(org.json.JSONArray(signersOf(rc.packageManager.getPackageInfo(pkg, sigFlags))).toString()) }
+    catch (t: Throwable) { promise.resolve("[]") }   // not installed
+  }
+
   // Recursive delete (Backpack's Storage data dir is a cache, wiped at every launch).
   @ReactMethod
   fun deleteTree(path: String, promise: Promise) {

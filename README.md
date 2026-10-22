@@ -13,55 +13,59 @@ APKs, their icons and the repository index are all Storage objects fetched by CI
 ## How it works
 
 ```
-desktop: backpack add app.apk ──REST──▶ Storage node (VPS, public p2p, mesh-only REST)
-         backpack publish     ──REST──▶ index.json (signed ed25519) → CID
-                              ──────▶ backpack://repo?i=<indexCID>&k=<key>&n=<name>&p=<peer>&a=<addr>&s=<spr>
-phone:   open link → libstorage: bootstrap off the SPR, dial the node, fetch the index CID
-         verify the signature with k → list apps → fetch icon/APK CIDs → SHA-256 vs index
-         → Android PackageInstaller (system confirmation)
+desktop:  backpack add app.apk | import-fdroid <repo> --fingerprint …   ──REST──▶ Storage node
+          backpack publish  → signed index (seq N) → CID                ──REST──▶ Storage node
+                            → signed pointer {key, seq N, index CID}   ──rsync/PUT──▶ any HTTPS host(s)
+phone:    backpack:// link (key + first index + nodes + pointer URLs)
+          on start: newest valid pointer (signature, seq > stored) → index CID → libstorage fetch
+          verify index (signature, key, seq ≥ stored, = pointer seq) → apps
+          install: fetch APK by CID → SHA-256 = index → signer = pinned signer (+ = installed app's)
+          → Android PackageInstaller
 ```
 
-- **Trust:** the repo *is* its ed25519 key. An index is accepted only if that key signed it, and
-  a newer index replaces an older one only when it's from the same key and newer (`created`). Each
-  APK's SHA-256 is in the signed index, so a Storage node can't swap the bytes.
-- **Index file:** `{"backpack":1,"body":"<json>","sig":"<b64url>"}`. The body is
-  `{v,name,key,created,nodes:[{peerId,addrs,spr}],apps:[{id,label,icon,versions:[{versionCode,
-  versionName,size,sha256,cid,minSdk,abis}]}]}`. The newest 3 versions per app are kept.
-- **Installing:** a PackageInstaller session (no FileProvider). Android asks once to allow "install
-  unknown apps" for Backpack, and shows its normal confirmation for each install or update.
-  Updates need the same signing key as the installed app, as always on Android.
+Decisions are in **[docs/adr](docs/adr/)**:
+- [0001](docs/adr/0001-repos-on-logos-storage.md): a repo is an ed25519 key; all content lives in Logos Storage.
+- [0002](docs/adr/0002-security-model.md): the security model (signed index, monotonic seq, SHA-256, pinned APK signers).
+- [0003](docs/adr/0003-updates-signed-pointer.md): updates by a signed pointer that can be served from anywhere.
+- [0004](docs/adr/0004-fdroid-import.md): F-Droid import, only through a verified index.
+- [0005](docs/adr/0005-phone-libstorage.md): the phone's libstorage build (PR #1540) and why.
 
 ## Use
 
 ```sh
 cd cli && npm install
-./backpack.mjs init --name "My backpack"   # --node http://…:8480 (a Storage node's REST API)
-./backpack.mjs add path/to/app.apk …
-./backpack.mjs publish                     # prints the link + ~/.backpack/<repo>/repo-qr.png
-./backpack.mjs ls
+./backpack.mjs init --name "My backpack"            # key in ~/.backpack/default/key.pem — back it up
+./backpack.mjs config --pointer-get https://example.org/backpack/<key>.json \
+                      --pointer-put rsync:host:/srv/www/backpack/<key>.json
+./backpack.mjs add path/to/app.apk …                 # records sha256 + signing cert per version
+./backpack.mjs import-fdroid http://host/fdroid/repo --fingerprint <repo cert sha256>
+./backpack.mjs publish                               # seq+1, index → Storage, pointer → hosts, link + QR
+./backpack.mjs verify --deep                         # check it all as a phone would
 ```
 
-Open the printed `backpack://` link on the phone, or scan the QR, to add the repo. After a new
-`publish`, open the new link: Backpack recognises the repo by its key and moves to the newer index.
+Open the printed `backpack://` link on the phone, or scan the QR, once. After that the phone
+follows the pointer: every `publish` reaches it on the next app start or pull-to-refresh.
 
-## Proof-of-concept limits (next steps)
+**Tests:**
+- `node cli/test/envelope.test.mjs` runs the CLI against the signing vectors.
+- `node --experimental-strip-types mobile/test/envelope-vectors.test.ts` runs the phone's verifier
+  against the same vectors.
+- `cli/test/make-vectors.mjs` regenerates them.
 
-- **Updating a repo needs a new link.** The link pins an index CID. Next: a mutable pointer, e.g.
-  the signed index CID announced on a Logos Delivery topic derived from the key, or a small "latest"
-  record the app polls.
-- **One Storage node.** The index can list several nodes; the CLI writes one. Hubs that pin the
-  repo's CIDs (cache-on-publish) would make it survive the node going away.
-- **No background update checks or notifications.** Refresh is pull-to-refresh.
-- **arm64 phones only** (libstorage ships for arm64).
-- **The phone's libstorage is Scala's build** (nim-codex 6af2049). The JNI glue here carries a fix
-  Scala doesn't have yet: a call that timed out freed its response while libstorage still held it
-  (use-after-free on a late callback).
+## Limits (next steps)
+
+- **Pointers are HTTPS.** They're signed, so the host is trusted only for liveness. The next step
+  is a Logos Delivery topic per repo key (ADR 0003).
+- **No key rotation yet.** A new repo key means a new link (ADR 0002).
+- **Download speed.** libstorage (PR #1540) downloads at about 100–200 KB/s from the VPS node; a
+  50 MB APK takes minutes.
+- **arm64 phones only.** The x86_64 build is for emulator tests (`BACKPACK_EMU=1`).
 
 ## Build the app
 
 ```sh
 cd mobile && npm install
-native/logosstorage/build-jni.sh          # JNI glue (+ copies libstorage.so from Scala's build)
+native/logosstorage/build-jni.sh          # JNI glue; libstorage.so per native/logosstorage/PROVENANCE (ADR 0005)
 npx expo prebuild --platform android --clean
 echo "sdk.dir=$HOME/Android/Sdk" > android/local.properties
 sed -i '0,/^android {/s//android {\n    lint { checkReleaseBuilds false; abortOnError false }/' android/app/build.gradle

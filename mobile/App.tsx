@@ -73,12 +73,17 @@ function Main() {
   // first load + backpack:// links (opened from a message, a QR scan, a browser)
   useEffect(() => {
     storage.lastCrash().then((c) => c && Alert.alert("Backpack stopped last time", `It crashed inside the Logos Storage call: ${c}. Please tell the developer.`));
-    R.loadRepos().then((rs) => { setRepos(rs); scanInstalled(rs); loadIcons(rs); });
-    Linking.getInitialURL().then((u) => { if (u && u.startsWith("backpack://repo")) add(u); });
+    // on start: show what we have, then ask each repo's pointers for anything newer (ADR 0003)
+    // (opened by a link: adding it refreshes that repo — don't race it with a refresh of all)
+    Promise.all([R.loadRepos(), Linking.getInitialURL()]).then(([rs, u]) => {
+      setRepos(rs); scanInstalled(rs); loadIcons(rs);
+      if (u && u.startsWith("backpack://repo")) add(u);
+      else if (rs.length) refreshAll();
+    });
     const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("backpack://repo")) add(url); });
     const st = AppState.addEventListener("change", (s) => { if (s === "active") R.loadRepos().then(scanInstalled); });
     return () => { sub.remove(); st.remove(); };
-  }, [add, scanInstalled, loadIcons]);
+  }, [add, refreshAll, scanInstalled, loadIcons]);
 
   const install = async (repo: R.Repo, app: R.App) => {
     const v = app.versions[0];
@@ -146,7 +151,7 @@ function Main() {
           <View key={r.key} style={{ marginBottom: 18 }}>
             <Pressable onLongPress={() => remove(r)} style={s.repoHead}>
               <Text style={s.repoName}>{r.name}</Text>
-              <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps · ${new Date(r.index.created).toLocaleDateString()}` : "not fetched"}</Text>
+              <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
             </Pressable>
             {r.error && <Text style={[s.hint, { color: C.err }]}>{r.error}</Text>}
             {(r.index?.apps ?? []).map((a) => {

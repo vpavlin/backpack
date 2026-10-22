@@ -1,0 +1,88 @@
+{
+ "key": "cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY",
+ "vectors": [
+  {
+   "name": "valid index",
+   "kind": "index",
+   "env": {
+    "backpack": 1,
+    "body": "{\"v\":2,\"name\":\"t\",\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":3,\"apps\":[]}",
+    "sig": "KpfwThxu70xgYEYQyoovLqCRr4TD8vDuLGHh0kdcossbhuA9y7C97Oss3_n41SpHCcDySsiyioeSkl95Avs6Dg"
+   },
+   "ok": true,
+   "seq": 3
+  },
+  {
+   "name": "valid pointer",
+   "kind": "pointer",
+   "env": {
+    "backpack": 1,
+    "kind": "pointer",
+    "body": "{\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":3,\"index\":\"zDvTest\"}",
+    "sig": "3zDazUOHGEmedoFfNWTaqNGcfRHYxZQEZMQcrLEn_6vam4qrno41gTzQa1uExW8Yclrq2miKgijKZOuj7v8vCQ"
+   },
+   "ok": true,
+   "seq": 3
+  },
+  {
+   "name": "body tampered",
+   "kind": "index",
+   "env": {
+    "backpack": 1,
+    "body": "{\"v\":2,\"name\":\"t\",\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":9,\"apps\":[]}",
+    "sig": "KpfwThxu70xgYEYQyoovLqCRr4TD8vDuLGHh0kdcossbhuA9y7C97Oss3_n41SpHCcDySsiyioeSkl95Avs6Dg"
+   },
+   "ok": false
+  },
+  {
+   "name": "signed by another key",
+   "kind": "index",
+   "env": {
+    "backpack": 1,
+    "body": "{\"v\":2,\"name\":\"t\",\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":4,\"apps\":[]}",
+    "sig": "y_MZoaR7VLfNmPy3yapkP6Q5J8eEOd7YcNAQFA2_biQ4Lpj8U6Q4n_f2hikhjVrzsqQBubWaZ1Jw1lWqy7w6DQ"
+   },
+   "ok": false
+  },
+  {
+   "name": "signed for another repo",
+   "kind": "index",
+   "env": {
+    "backpack": 1,
+    "body": "{\"v\":2,\"name\":\"t\",\"key\":\"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\",\"seq\":4,\"apps\":[]}",
+    "sig": "-IREn6DHuau0jyUTY99c65zbkfcqjifgcYHl7obFuBScpISOAINaymaTtQdns7By7A4C4-mSoq6G-1sCcV_TAA"
+   },
+   "ok": false
+  },
+  {
+   "name": "pointer used as index",
+   "kind": "index",
+   "env": {
+    "backpack": 1,
+    "kind": "pointer",
+    "body": "{\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":3,\"index\":\"zDvTest\"}",
+    "sig": "3zDazUOHGEmedoFfNWTaqNGcfRHYxZQEZMQcrLEn_6vam4qrno41gTzQa1uExW8Yclrq2miKgijKZOuj7v8vCQ"
+   },
+   "ok": false
+  },
+  {
+   "name": "index used as pointer",
+   "kind": "pointer",
+   "env": {
+    "backpack": 1,
+    "body": "{\"v\":2,\"name\":\"t\",\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":3,\"apps\":[]}",
+    "sig": "KpfwThxu70xgYEYQyoovLqCRr4TD8vDuLGHh0kdcossbhuA9y7C97Oss3_n41SpHCcDySsiyioeSkl95Avs6Dg"
+   },
+   "ok": false
+  },
+  {
+   "name": "sig stripped",
+   "kind": "index",
+   "env": {
+    "backpack": 1,
+    "body": "{\"v\":2,\"name\":\"t\",\"key\":\"cQEtJ3YNf44PesoLdA8sCozn15afOm2FBPp3v2b3KLY\",\"seq\":3,\"apps\":[]}"
+   },
+   "ok": false
+  }
+ ]
+}
