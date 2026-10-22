@@ -19,7 +19,7 @@
 // The generated Nim entrypoint; must run once before storage_new (sets up the GC + threads).
 extern void libstorageNimMain(void);
 
-#define RESP_TIMEOUT_MS 120000  // 120s — a network download can be slow
+#define RESP_TIMEOUT_MS 600000  // 10 min: a slow start/fetch must finish, not be retried (a 2nd start aborts libstorage)
 
 typedef struct {
     pthread_mutex_t mutex;

@@ -22,6 +22,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
 
   companion object {
     @Volatile private var libsLoaded = false
+    @Volatile private var nimStarted = false  // libstorageNimMain must run exactly once per process
 
     // Lazy (on setup()) so merely registering the module on a non-arm64 build (x86_64 emulator,
     // which ships no libstorage.so) does NOT crash at startup — the error surfaces only if used.
@@ -71,7 +72,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     try { ensureLibsLoaded() } catch (t: Throwable) {
       promise.reject("loadlib", "Logos Storage native library unavailable: ${t.message}"); return
     }
-    storageSetup()
+    synchronized(LogosStorageModule::class.java) { if (!nimStarted) { storageSetup(); nimStarted = true } }
     promise.resolve(null)
   }
 

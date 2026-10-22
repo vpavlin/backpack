@@ -61,6 +61,7 @@ function Main() {
 
   // first load + backpack:// links (opened from a message, a QR scan, a browser)
   useEffect(() => {
+    storage.lastCrash().then((c) => c && Alert.alert("Backpack stopped last time", `It crashed inside the Logos Storage call: ${c}. Please tell the developer.`));
     R.loadRepos().then((rs) => { setRepos(rs); scanInstalled(rs); loadIcons(rs); });
     Linking.getInitialURL().then((u) => { if (u && u.startsWith("backpack://repo")) add(u); });
     const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("backpack://repo")) add(url); });

@@ -9,6 +9,8 @@ const { withDangerousMod, withMainApplication, withGradleProperties, withAppBuil
 const fs = require("fs");
 const path = require("path");
 
+// BACKPACK_EMU=1 adds x86_64 (an x86_64 libstorage built for the emulator) for test builds only.
+const ABIS = process.env.BACKPACK_EMU === "1" ? ["arm64-v8a", "x86_64"] : ["arm64-v8a"];
 const PACKAGES = ["xyz.vpavlin.scalastorage.LogosStoragePackage", "xyz.vpavlin.backpack.installer.BackpackInstallerPackage"];
 
 function copyDir(src, dst) {
@@ -23,7 +25,7 @@ function copyDir(src, dst) {
 const withFiles = (config) => withDangerousMod(config, ["android", async (cfg) => {
   const root = cfg.modRequest.projectRoot, android = cfg.modRequest.platformProjectRoot;
   for (const mod of ["logosstorage", "installer"]) copyDir(path.join(root, "native", mod, "android", "java"), path.join(android, "app/src/main/java"));
-  copyDir(path.join(root, "native", "logosstorage", "arm64-v8a"), path.join(android, "app/src/main/jniLibs/arm64-v8a"));
+  for (const abi of ABIS) copyDir(path.join(root, "native", "logosstorage", abi), path.join(android, "app/src/main/jniLibs", abi));
   return cfg;
 }]);
 
@@ -34,9 +36,12 @@ const withPackages = (config) => withMainApplication(config, (cfg) => {
   return cfg;
 });
 
+// arm64 only, and legacy jniLibs packaging: libstorage.so is loaded with System.loadLibrary and must
+// be a real file on disk, not mapped from inside the APK (Scala's withLogosDelivery does the same).
 const withArm64 = (config) => withGradleProperties(config, (cfg) => {
-  cfg.modResults = cfg.modResults.filter((p) => p.key !== "reactNativeArchitectures");
-  cfg.modResults.push({ type: "property", key: "reactNativeArchitectures", value: "arm64-v8a" });
+  const set = (key, value) => { cfg.modResults = cfg.modResults.filter((p) => p.key !== key); cfg.modResults.push({ type: "property", key, value }); };
+  set("reactNativeArchitectures", ABIS.join(","));
+  set("expo.useLegacyPackaging", "true");
   return cfg;
 });
 

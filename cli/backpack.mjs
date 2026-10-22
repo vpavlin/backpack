@@ -69,8 +69,22 @@ function badging(apk) {
     label: get(/application-label:'([^']*)'/) ?? get(/package: name='([^']+)'/),
     minSdk: Number(get(/minSdkVersion:'(\d+)'/) ?? 0),
     abis: (get(/native-code: (.+)/) ?? "").replace(/'/g, "").split(" ").filter(Boolean),
-    icon: icons.find(([, p]) => p.endsWith(".png"))?.[1] ?? null, // adaptive xml icons are skipped
+    icon: rasterIcon(apk, icons[0]?.[1] ?? get(/application: .*icon='([^']+)'/) ?? null),
   };
+}
+
+// The badging icon is often an adaptive-icon XML; its resource also has per-density rasters
+// (png/webp). Take the largest one.
+function rasterIcon(apk, icon) {
+  if (!icon || /\.(png|webp)$/.test(icon)) return icon;
+  const dump = execFileSync(AAPT, ["dump", "resources", apk], { encoding: "utf8", maxBuffer: 256 << 20 });
+  const blocks = dump.split(/\n(?=\s*resource 0x)/);
+  const block = blocks.find((b) => b.includes(`(file) ${icon}`));
+  if (!block) return null;
+  const order = ["xxxhdpi", "xxhdpi", "xhdpi", "hdpi", "mdpi", ""];
+  const files = [...block.matchAll(/\((\w*)[^)]*\) \(file\) (\S+\.(?:png|webp))/g)].map((m) => [m[1], m[2]]);
+  files.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+  return files[0]?.[1] ?? null;
 }
 
 // ── commands ─────────────────────────────────────────────────────────────────
@@ -97,9 +111,10 @@ async function add() {
     const cid = await upload(s.node, apk, `${m.id}_${m.versionCode}.apk`, "application/vnd.android.package-archive");
     let iconCid = s.apps[m.id]?.icon ?? null;
     if (m.icon) {
-      const tmp = path.join(os.tmpdir(), `backpack-icon-${process.pid}.png`);
+      const ext = m.icon.endsWith(".webp") ? "webp" : "png";
+      const tmp = path.join(os.tmpdir(), `backpack-icon-${process.pid}.${ext}`);
       fs.writeFileSync(tmp, execFileSync("unzip", ["-p", apk, m.icon], { maxBuffer: 16 << 20 }));
-      iconCid = await upload(s.node, tmp, `${m.id}.png`, "image/png");
+      iconCid = await upload(s.node, tmp, `${m.id}.${ext}`, `image/${ext}`);
       fs.rmSync(tmp);
     }
     const app = (s.apps[m.id] ??= { id: m.id, label: m.label, icon: null, versions: [] });

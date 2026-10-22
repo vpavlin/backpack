@@ -78,6 +78,12 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
   @ReactMethod
   fun deleteFile(path: String, promise: Promise) { promise.resolve(File(path).delete()) }
 
+  // Recursive delete (Backpack's Storage data dir is a cache, wiped at every launch).
+  @ReactMethod
+  fun deleteTree(path: String, promise: Promise) {
+    Thread { try { promise.resolve(File(path).deleteRecursively()) } catch (t: Throwable) { promise.resolve(false) } }.start()
+  }
+
   // Write the APK into an install session and commit. Resolves "installed" when Android reports
   // success, "cancelled" if the user backs out; rejects with Android's message on failure.
   @ReactMethod
