@@ -176,6 +176,9 @@ export const installer = {
   installerOf: (pkg: string): Promise<string> => Installer.installerOf(pkg),
   installedSigners: async (pkg: string): Promise<string[]> => JSON.parse(await Installer.installedSigners(pkg)),
   apkInfo: async (path: string): Promise<{ packageName: string; versionCode: number }> => JSON.parse(await Installer.apkInfo(path)),
+  awaitingInstalls: async (): Promise<string[]> => { try { return JSON.parse(await Installer.awaitingInstalls()); } catch { return []; } },
+  reconfirm: (pkg: string): Promise<boolean> => Installer.reconfirm(pkg),
+  abandon: (pkg: string): Promise<boolean> => Installer.abandon(pkg),
 };
 
 export interface Update { repo: Repo; app: App; v: Version; from: number }

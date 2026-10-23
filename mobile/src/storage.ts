@@ -182,7 +182,11 @@ async function getFileOn(c: string, cid: string, path: string, peers: Peer[], on
   // One progress measure across both calls: blocks landing in the node's store (fetch) or the file
   // growing (download_stream), whichever is further. Never goes backwards.
   const store = `${await LS.filesDir()}/storage`, base = await dirSize(store);
-  const measure = async () => Math.max((await dirSize(store)) - base, await fileSize(path));
+  // Progress = bytes of THIS file written so far. The block store's growth looked tempting but it also
+  // grows from other fetches still running in the background (icons, earlier CIDs), so it ran ahead of
+  // the truth ("30 of 40 MB" while still pulling). download_stream writes the file as blocks arrive.
+  void store; void base;
+  const measure = async () => Math.max(0, await fileSize(path));
   for (const p of peers) {
     checkCancel(cid);
     try { onStage?.("connecting"); diag(`connect ${p.peerId.slice(-8)} ${p.addrs.join(",")}`); await LS.connect(c, p.peerId, p.addrs); diag("connect ok"); }

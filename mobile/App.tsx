@@ -147,13 +147,29 @@ function Main() {
     // updates again if the last check is more than 15 minutes old
     const st = AppState.addEventListener("change", (s) => {
       if (s !== "active") return;
+      // an install whose Android dialog was dismissed sends no answer: offer to show it again (Confirm)
+      setTimeout(async () => {
+        const waiting = await R.installer.awaitingInstalls();
+        if (waiting.length) setStage((m) => { const n = { ...m }; for (const pkg of waiting) if (n[pkg]) n[pkg] = AWAITING; return n; });
+      }, 1500);
       if (Date.now() - lastRefresh.current > 15 * 60_000 && !updatingRef.current) refreshAll();
       else R.loadRepos().then(scanInstalled);
     });
     return () => { sub.remove(); st.remove(); };
   }, [add, refreshAll, scanInstalled, loadIcons]);
 
-  const install = async (repo: R.Repo, app: R.App, quiet = false): Promise<string> => {
+  // One install per app at a time (an automatic update, a refresh triggered by a new note and a tap could
+  // each start one: the first to finish deleted the shared file and Android asked several times). A second
+  // request for the same app joins the running one.
+  const running = useRef(new Map<string, Promise<string>>());
+  const install = (repo: R.Repo, app: R.App, quiet = false): Promise<string> => {
+    const cur = running.current.get(app.id);
+    if (cur) return cur;
+    const p = installOnce(repo, app, quiet).finally(() => running.current.delete(app.id));
+    running.current.set(app.id, p);
+    return p;
+  };
+  const installOnce = async (repo: R.Repo, app: R.App, quiet = false): Promise<string> => {
     const v = app.versions[0];
     const set = (s: string | null) => setStage((m) => { const n = { ...m }; if (s) n[app.id] = s; else delete n[app.id]; return n; });
     let res = "failed";
@@ -173,7 +189,10 @@ function Main() {
   };
 
   // Cancel a running download (the stages before "checking": nothing is installed yet).
-  const cancelDownload = (app: R.App) => { const v = app.versions[0]; if (v) storage.cancel(v.cid); };
+  const cancelDownload = (app: R.App) => {
+    if (stage[app.id] === AWAITING) { R.installer.abandon(app.id); return; }
+    const v = app.versions[0]; if (v) storage.cancel(v.cid);
+  };
   const cancellable = (st?: string) => !!st && !/^(checking|installing)/.test(st);
 
   // After every refresh: download and install updates for installed apps, one at a time. Android asks
@@ -268,7 +287,9 @@ function Main() {
                     {st && !prog[a.id] && <Text style={[s.appMeta, { color: C.accent }]}>{st}…</Text>}
                     {st && prog[a.id] && <ProgressBar p={prog[a.id]} stage={st} />}
                   </View>
-                  {cancellable(st) ? (
+                  {st === AWAITING ? (
+                    <Pressable style={s.btn} onPress={() => R.installer.reconfirm(a.id)}><Text style={s.btnT}>Confirm</Text></Pressable>
+                  ) : cancellable(st) ? (
                     <Pressable style={s.btnGhost} onPress={() => cancelDownload(a)}><Text style={[s.btnGhostT, { color: C.err }]}>Cancel</Text></Pressable>
                   ) : (
                     <Pressable disabled={!!st} style={[action === "Open" ? s.btnGhost : s.btn, st && { opacity: 0.4 }]}
@@ -326,6 +347,7 @@ function SettingsScreen({ prefs, onChange, onClose }: { prefs: settingsStore.Set
   );
 }
 
+const AWAITING = "waiting for you to confirm the install";
 const keyShort = (k: string) => `${k.slice(0, 6)}…${k.slice(-4)}`;
 const certShort = (h?: string) => (h ? `${h.slice(0, 8)}…${h.slice(-8)}` : "not pinned");
 
@@ -416,6 +438,8 @@ function ProgressBar({ p, stage }: { p: storage.Progress; stage: string }) {
   const label = busy
     ? `downloading${retry} ${mb(p.bytes)}${p.total ? ` / ${mb(p.total)} · ${Math.floor(frac * 100)}%` : ""} · ${(p.rate / 1024).toFixed(0)} KB/s${eta}`
     : `${stage}…`;
+  // the bar only while bytes are actually moving: "connecting…" next to a half-full bar read as a lie
+  if (!busy) return <Text style={[s.appMeta, { color: C.accent, marginTop: 4 }]}>{label}</Text>;
   return (
     <View style={{ marginTop: 4 }}>
       <View style={s.barBg}><View style={[s.barFg, { width: `${Math.round(frac * 100)}%` }]} /></View>

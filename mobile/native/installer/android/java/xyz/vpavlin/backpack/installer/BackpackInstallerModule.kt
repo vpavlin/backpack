@@ -157,6 +157,27 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
     Thread { try { promise.resolve(File(path).deleteRecursively()) } catch (t: Throwable) { promise.resolve(false) } }.start()
   }
 
+  // Sessions waiting for the user's answer in Android's dialog. If the dialog is dismissed (back, tap
+  // outside) Android sends nothing, so the app asks which are still waiting and can show it again
+  // (reconfirm) or give up (abandon).
+  private class Awaiting(val session: Int, val confirm: Intent?, val promise: Promise, val receiver: BroadcastReceiver)
+  private val awaiting = java.util.concurrent.ConcurrentHashMap<String, Awaiting>()
+
+  @ReactMethod fun awaitingInstalls(promise: Promise) { promise.resolve(org.json.JSONArray(awaiting.keys.toList()).toString()) }
+  @ReactMethod fun reconfirm(pkg: String, promise: Promise) {
+    val a = awaiting[pkg]
+    if (a?.confirm == null) { promise.resolve(false); return }
+    try { rc.startActivity(Intent(a.confirm).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); promise.resolve(true) } catch (t: Throwable) { promise.resolve(false) }
+  }
+  @ReactMethod fun abandon(pkg: String, promise: Promise) {
+    val a = awaiting.remove(pkg)
+    if (a == null) { promise.resolve(false); return }
+    try { rc.packageManager.packageInstaller.abandonSession(a.session) } catch (_: Throwable) {}
+    try { rc.unregisterReceiver(a.receiver) } catch (_: Throwable) {}
+    a.promise.resolve("cancelled")
+    promise.resolve(true)
+  }
+
   // Write the APK into an install session and commit. Resolves "installed" when Android reports
   // success, "cancelled" if the user backs out; rejects with Android's message on failure.
   @ReactMethod
@@ -189,14 +210,16 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
                 PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                   @Suppress("DEPRECATION")
                   val confirm = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java) else intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                  confirm?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)?.let { rc.startActivity(it) }
+                  confirm?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  awaiting[pkg] = Awaiting(id, confirm, promise, this)
+                  confirm?.let { rc.startActivity(it) }
                 }
                 PackageInstaller.STATUS_SUCCESS -> { done(ctx); promise.resolve("installed") }
                 PackageInstaller.STATUS_FAILURE_ABORTED -> { done(ctx); promise.resolve("cancelled") }
                 else -> { done(ctx); promise.reject("install_$st", intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "install failed ($st)") }
               }
             }
-            fun done(ctx: Context) { try { ctx.unregisterReceiver(this) } catch (_: Throwable) {} }
+            fun done(ctx: Context) { awaiting.remove(pkg); try { ctx.unregisterReceiver(this) } catch (_: Throwable) {} }
           }
           val filter = IntentFilter(action)
           if (Build.VERSION.SDK_INT >= 33) rc.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
