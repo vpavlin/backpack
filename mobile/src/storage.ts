@@ -232,13 +232,13 @@ async function loamAvailable(): Promise<boolean> {
 }
 
 async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s: string) => void) | undefined,
-                          onProgress: ((p: Progress) => void) | undefined, size: SizeRule): Promise<string> {
+                          onProgress: ((p: Progress) => void) | undefined, size: SizeRule, retried = false): Promise<string> {
   viaLoam.add(cid);
   onStage?.("fetching");
   let st = await loam.fetch(cid, peers.slice(0, 8));
   if (!st) throw new Error("Loam didn't answer");
   diag(`loam job ${cid.slice(-10)}: ${st.state}`);
-  let last = 0, lastT = Date.now(), rate = 0, checkedSize = false;
+  let last = 0, lastT = Date.now(), rate = 0, checkedSize = false, restarts = 0;
   while (st && (st.state === "queued" || st.state === "fetching")) {
     checkCancel(cid);
     // the size comes from the manifest (Loam reads it before any data block): check it as soon as known
@@ -252,6 +252,8 @@ async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s
     onProgress?.({ phase: "downloading", bytes: b, total: st.total ?? 0, rate: Math.max(0, rate) });
     await new Promise((r) => setTimeout(r, 1000));
     st = await loam.status(cid);
+    // "none": Loam forgot the job (cache cleared, file evicted, Loam restarted) — ask again, a few times
+    if (st?.state === "none" && restarts++ < 3) { diag(`loam job ${cid.slice(-10)} gone: fetching again`); st = await loam.fetch(cid, peers.slice(0, 8)); }
   }
   checkCancel(cid);
   if (!st || st.state !== "done") {
@@ -260,7 +262,15 @@ async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s
   }
   checkSize(`"datasetSize":${st.total ?? st.bytes ?? 0}`, size);
   onStage?.("writing");
-  const n = await loam.saveTo(cid, path);
+  let n: number;
+  try { n = await loam.saveTo(cid, path); }
+  catch (e) {
+    // the file went away between "done" and the copy (cache cleared): one more round
+    if (retried) throw e;
+    diag(`loam ${cid.slice(-10)}: file gone before the copy, fetching again`);
+    viaLoam.delete(cid);
+    return getViaLoam(cid, path, peers, onStage, onProgress, size, true);
+  }
   diag(`loam ${cid.slice(-10)}: ${n} bytes`);
   // return the content when small (the index), like the embedded path
   return n > 0 && n <= (1 << 20) ? String(await LS.readFileUtf8(path)) : "";
