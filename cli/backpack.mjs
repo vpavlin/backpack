@@ -250,13 +250,19 @@ async function publish() {
   const s = load();
   s.pointers ??= { get: [], put: [] };
   const node = await nodeInfo(s.node);
+  const nodesNow = [{ peerId: node.peerId, addrs: node.addrs, spr: node.spr }];
+  const apps = Object.values(s.apps).sort((a, b) => a.label.localeCompare(b.label));
+  // nothing changed since the last publish → no new seq (phones would just re-download the same list).
+  // The SPR is left out: the node re-signs it with a new sequence number now and then.
+  const contentHash = sha256hex(Buffer.from(JSON.stringify({ name: s.name, nodes: nodesNow.map((n) => ({ peerId: n.peerId, addrs: [...n.addrs].sort() })), pointers: s.pointers.get, apps })));
+  if (contentHash === s.lastContentHash && !flag("force")) {
+    console.log(`nothing changed since seq ${s.seq}; not publishing (--force to publish anyway)`);
+    return;
+  }
   const seq = (s.seq ?? 0) + 1;
   const created = new Date().toISOString();
-  const nodes = [{ peerId: node.peerId, addrs: node.addrs, spr: node.spr }];
-  const index = envelope("index", {
-    v: 2, name: s.name, key: pubOf(), seq, created, nodes, pointers: s.pointers.get,
-    apps: Object.values(s.apps).sort((a, b) => a.label.localeCompare(b.label)),
-  });
+  const nodes = nodesNow;
+  const index = envelope("index", { v: 2, name: s.name, key: pubOf(), seq, created, nodes, pointers: s.pointers.get, apps });
   const t = tmpDir();
   const indexFile = path.join(t, "backpack-index.json");
   fs.writeFileSync(indexFile, JSON.stringify(index));
@@ -265,7 +271,7 @@ async function publish() {
   const pointer = envelope("pointer", { key: pubOf(), seq, index: cid, created, nodes });
   const pointerFile = path.join(dir, "latest.json");
   fs.writeFileSync(pointerFile, JSON.stringify(pointer));
-  s.seq = seq; s.lastIndex = cid;
+  s.seq = seq; s.lastIndex = cid; s.lastContentHash = contentHash;
   for (const target of s.pointers.put) {
     try {
       if (target.startsWith("rsync:")) execFileSync("rsync", ["-q", "--chmod=F644", pointerFile, target.slice(6)], { stdio: "inherit" });
@@ -368,7 +374,7 @@ if (!run) {
   config [--node URL] [--pointer-get URL]… [--pointer-put rsync:dest|put:URL|exec:CMD]… [--clear-pointers]
   add APK… [--name --summary --description --license]
   import-fdroid <repo URL> --fingerprint SHA256 [--versions N] [--only pkg,pkg]
-  publish
+  publish [--force]       (skips when nothing changed)
   verify [backpack://link] [--deep]
   rehost                 re-upload APKs with 512 KiB blocks (faster downloads, ADR 0006)
   ls`);

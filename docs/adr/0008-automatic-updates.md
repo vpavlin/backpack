@@ -32,6 +32,16 @@
   "store" means the pointer was signed before Backpack started listening, so it came from Store;
   "live" means it arrived while listening.
 
+- **Settings** (0.2.5), on the device:
+  - *Install app updates automatically* (default on). Repos are always checked on open; this switch
+    only decides whether updates for installed apps are then downloaded and installed by themselves.
+  - *Also check repositories' web addresses* (default **off**). Off: update notes come only over Logos
+    Delivery (ADR 0007). Only the signed note (seq + index CID) ever came over HTTP; the index, icons
+    and APKs always come from Logos Storage by CID. With it off and no Loam app, a repo stays at the
+    version its link pointed to until it is opened from a newer link.
+- **The CLI skips `publish` when nothing changed** (`--force` to publish anyway), so a routine run
+  doesn't bump `seq` and make every phone re-fetch the same index.
+
 ## Not yet
 
 - A setting to limit automatic downloads to Wi-Fi.

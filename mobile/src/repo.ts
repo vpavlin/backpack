@@ -10,6 +10,7 @@ export { openEnvelope };
 import { NativeModules } from "react-native";
 import * as storage from "./storage";
 import * as delivery from "./delivery";
+import * as settings from "./settings";
 
 const Installer: any = (NativeModules as any).BackpackInstaller;
 
@@ -56,7 +57,9 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
   const d = delivery.pointerFor(repo.key), ds = delivery.status();
   if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
   else sources.push({ name: "Delivery", error: ds.state === "on" ? "nothing yet" : ds.state === "unavailable" ? "Loam not available" : "starting" });
-  await Promise.all(uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])]).map(async (url) => {
+  const urls = uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])]);
+  if (!settings.get().webPointers) { if (urls.length) sources.push({ name: "web", error: "off in Settings" }); }
+  else await Promise.all(urls.map(async (url) => {
     const name = (() => { try { return new URL(url).host; } catch { return url; } })();
     try {
       const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 15000);

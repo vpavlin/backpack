@@ -1,6 +1,6 @@
 // Backpack — install Android apps from repositories that live in Logos Storage.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, AppState, Image, Linking as RNLinking, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, AppState, Image, Linking as RNLinking, Modal, Pressable, Switch, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Clipboard from "expo-clipboard";
@@ -8,6 +8,7 @@ import * as Linking from "expo-linking";
 import * as R from "./src/repo";
 import * as storage from "./src/storage";
 import * as delivery from "./src/delivery";
+import * as settingsStore from "./src/settings";
 
 const C = { bg: "#14161a", card: "#1d2026", line: "#2a2e36", text: "#e8e6e3", dim: "#9aa0a8", accent: "#e0a458", ok: "#7fbf7f", err: "#e07a6a" };
 const mb = (n: number) => `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
@@ -26,6 +27,8 @@ function Main() {
   const [prog, setProg] = useState<Record<string, storage.Progress>>({}); // app id → download progress
   const [icons, setIcons] = useState<Record<string, string>>({});
   const [showDiag, setShowDiag] = useState(false);
+  const [prefs, setPrefs] = useState<settingsStore.Settings>(settingsStore.DEFAULTS);
+  const [showSettings, setShowSettings] = useState(false);
   const [detail, setDetail] = useState<{ repo: R.Repo; app: R.App } | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);  // "Updating Kith (1 of 2)…"
   const updatingRef = useRef(false);
@@ -94,7 +97,8 @@ function Main() {
     storage.lastCrash().then((c) => c && Alert.alert("Backpack stopped last time", `It crashed inside the Logos Storage call: ${c}. Please tell the developer.`));
     // on start: show what we have, then ask each repo's pointers for anything newer (ADR 0003)
     // (opened by a link: adding it refreshes that repo — don't race it with a refresh of all)
-    Promise.all([R.loadRepos(), Linking.getInitialURL()]).then(([rs, u]) => {
+    Promise.all([R.loadRepos(), Linking.getInitialURL(), settingsStore.load()]).then(([rs, u, st]) => {
+      setPrefs(st);
       setRepos(rs); scanInstalled(rs); loadIcons(rs);
       if (rs.length) listen(rs);   // start Delivery first: its Store pull runs while the web sources answer
       if (u && u.startsWith("backpack://repo")) add(u);
@@ -133,7 +137,7 @@ function Main() {
   // After every refresh: download and install updates for installed apps, one at a time. Android asks
   // to confirm each one, except for apps Backpack itself installed (Android 12+ updates those silently).
   const autoUpdate = async (rs: R.Repo[], inst: Record<string, number>) => {
-    if (updatingRef.current) return;
+    if (updatingRef.current || !settingsStore.get().autoInstall) return;
     const ups = await R.pendingUpdates(rs, inst);
     if (!ups.length) return;
     updatingRef.current = true;
@@ -156,6 +160,7 @@ function Main() {
     <SafeAreaView style={s.root} edges={["top", "bottom"]}>
       <View style={s.head}>
         <Text style={s.title}>🎒 Backpack</Text>
+        <Pressable onPress={() => setShowSettings(true)} style={[s.headBtn, { marginRight: 8 }]}><Text style={s.headBtnT}>⚙</Text></Pressable>
         <Pressable onPress={() => setShowDiag((d) => !d)} style={[s.headBtn, { marginRight: 8 }]}><Text style={s.headBtnT}>{showDiag ? "Hide log" : "Log"}</Text></Pressable>
         <Pressable onPress={() => setAdding((a) => !a)} style={s.headBtn}><Text style={s.headBtnT}>{adding ? "Close" : "+ Repo"}</Text></Pressable>
       </View>
@@ -234,6 +239,12 @@ function Main() {
           </View>
         ))}
       </ScrollView>
+      {showSettings && (
+        <Modal visible animationType="slide" onRequestClose={() => setShowSettings(false)}>
+          <SettingsScreen prefs={prefs} onClose={() => setShowSettings(false)}
+            onChange={async (patch) => { const next = await settingsStore.set(patch); setPrefs(next); if (patch.webPointers) refreshAll(); }} />
+        </Modal>
+      )}
       {/* rendered only while open: a hidden RN Modal still renders its body */}
       {detail && (
         <Modal visible animationType="slide" onRequestClose={() => setDetail(null)}>
@@ -242,6 +253,32 @@ function Main() {
             onInstall={() => install(detail.repo, detail.app)} onCancel={cancellable(stage[detail.app.id]) ? () => cancelDownload(detail.app) : undefined} />
         </Modal>
       )}
+    </SafeAreaView>
+  );
+}
+
+function SettingsScreen({ prefs, onChange, onClose }: { prefs: settingsStore.Settings; onChange: (p: Partial<settingsStore.Settings>) => void; onClose: () => void }) {
+  const Row = ({ title, body, value, onValue }: { title: string; body: string; value: boolean; onValue: (v: boolean) => void }) => (
+    <View style={[s.card, { flexDirection: "row", alignItems: "center" }]}>
+      <View style={{ flex: 1, marginRight: 12 }}>
+        <Text style={s.appName}>{title}</Text>
+        <Text style={[s.hint, { marginTop: 4 }]}>{body}</Text>
+      </View>
+      <Switch value={value} onValueChange={onValue} trackColor={{ true: C.accent, false: C.line }} thumbColor={C.text} />
+    </View>
+  );
+  return (
+    <SafeAreaView style={s.root} edges={["top", "bottom"]}>
+      <View style={s.head}>
+        <Pressable onPress={onClose} style={s.headBtn}><Text style={s.headBtnT}>‹ Back</Text></Pressable>
+        <Text style={[s.title, { marginLeft: 12, fontSize: 20 }]}>Settings</Text>
+      </View>
+      <ScrollView contentContainerStyle={{ padding: 12 }}>
+        <Row title="Install app updates automatically" value={prefs.autoInstall} onValue={(v) => onChange({ autoInstall: v })}
+          body="Repositories are always checked when Backpack opens. With this on, updates for apps you have installed are then downloaded and installed too (Android may still ask you to confirm). Off: you tap Update yourself." />
+        <Row title="Also check repositories' web addresses" value={prefs.webPointers} onValue={(v) => onChange({ webPointers: v })}
+          body="How Backpack learns about a new repository version. Off: only over Logos Delivery, through the Loam app. On: also from each repository's HTTPS address. Only the small signed update note ever comes from the web; the app list and the APKs always come from Logos Storage, and every note is checked against the repository's key." />
+      </ScrollView>
     </SafeAreaView>
   );
 }
