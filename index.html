@@ -85,7 +85,7 @@ footer{padding:30px 0 50px;color:var(--dim);font-size:14px;border-top:1px solid 
 <body>
 <header class="top"><div class="wrap">
   <img src="mark.svg" alt=""><b>Backpack</b>
-  <nav><a href="#how">How it works</a><a href="#trust">Trust</a><a href="#updates">Updates</a><a href="#speed">Speed</a><a href="#publish">Publish</a><a href="#status">Status</a></nav>
+  <nav><a href="#demo">Demo</a><a href="#how">How it works</a><a href="#trust">Trust</a><a href="#updates">Updates</a><a href="#speed">Speed</a><a href="#publish">Publish</a><a href="#status">Status</a></nav>
   <button class="theme" id="theme" aria-label="Switch colour theme">◐</button>
 </div></header>
 
@@ -102,6 +102,17 @@ footer{padding:30px 0 50px;color:var(--dim);font-size:14px;border-top:1px solid 
     </div>
     <img class="mark" src="mark.svg" alt="Backpack logo: an amber backpack whose pocket holds three linked nodes">
   </div>
+
+  <section id="demo">
+    <div class="kicker">See it work</div>
+    <h2>Three minutes, start to update</h2>
+    <p class="intro">Recorded on an Android emulator: Backpack asks the Loam app to share its node, a repository is added from a link, the list and icons arrive from Logos Storage (each with its content ID), an update is published, and the download keeps going in Loam after Backpack is closed. Reopened, Backpack installs straight from Loam's cache.</p>
+    <div style="display:flex;justify-content:center;margin-top:22px">
+      <video src="demo.mp4" poster="demo-poster.jpg" controls playsinline preload="none"
+        style="width:100%;max-width:360px;border-radius:18px;border:1px solid var(--line);background:#14161a"></video>
+    </div>
+    <p class="note">The emulator can't run Loam's Logos Delivery node (it is built for arm64 phones), so in this video the update note comes over the web. On a phone it arrives over Delivery, live or from the network's Store.</p>
+  </section>
 
   <section id="why">
     <div class="kicker">Why</div>
