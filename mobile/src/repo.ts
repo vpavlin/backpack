@@ -62,7 +62,7 @@ export async function newestPointer(repo: Repo): Promise<Pointer | null> {
  * otherwise (re)loads `repo.indexCid` only if we have no index yet. Refuses any index whose seq is
  * below the highest one accepted (rollback), and an index that disagrees with its pointer.
  */
-export async function refresh(repo: Repo, onStage?: (s: string) => void): Promise<Repo> {
+export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<Repo> {
   const have = repo.seq ?? 0;
   onStage?.("checking for updates");
   const ptr = await newestPointer(repo);
@@ -73,7 +73,7 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void): Promis
   }
   const peers = uniq([...(ptr?.nodes ?? []), ...repo.peers].map((p) => JSON.stringify(p))).map((s) => JSON.parse(s));
   const dir = await storage.filesDir();
-  const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage);
+  const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress);
   const index = openEnvelope<Index>(JSON.parse(raw), repo.key, "index");
   const seq = index.seq ?? 0;
   if (seq < have) throw new Error(`this index is older than the one you have (seq ${seq} < ${have}): refusing`);
@@ -126,10 +126,10 @@ export const installer = {
  * certificate is the one the index pins; and, if the app is installed, the installed app has that
  * signer too (Android would refuse the update anyway, but only after the user said yes).
  */
-export async function install(repo: Repo, app: App, v: Version, onStage: (s: string) => void): Promise<string> {
+export async function install(repo: Repo, app: App, v: Version, onStage: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<string> {
   const path = `${await storage.filesDir()}/apks/${app.id}_${v.versionCode}.apk`;
   const have = await storage.fileSize(path);
-  if (have !== v.size) await storage.getFile(v.cid, path, repo.peers, onStage);
+  if (have !== v.size) await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress);
   onStage("checking");
   const sha = await Installer.sha256(path);
   if (sha !== v.sha256) { await Installer.deleteFile(path); throw new Error("the downloaded APK doesn't match the repo's checksum"); }
@@ -139,6 +139,9 @@ export async function install(repo: Repo, app: App, v: Version, onStage: (s: str
     const installed: string[] = JSON.parse(await Installer.installedSigners(app.id));
     if (installed.length && !installed.includes(v.signer)) throw new Error(`the installed ${app.label} is signed by a different key (${installed[0].slice(0, 8)}…). Android won't update it; uninstall it first if you trust this repo.`);
   }
+  // Ask for the install permission only now: the download doesn't need it, and the checked file stays
+  // cached (same size → no re-download), so the next tap goes straight to installing.
+  if (!(await Installer.canInstall())) return "needs-permission";
   onStage("installing");
   const res: string = await Installer.install(path);
   if (res === "installed") await Installer.deleteFile(path);

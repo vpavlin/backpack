@@ -99,6 +99,7 @@ export async function nodeSummary(): Promise<string> {
     return `node ${String(j.id ?? "").slice(-8)} addrs ${JSON.stringify(j.addrs ?? [])} table ${n}`;
   } catch { return raw.slice(0, 300); }
 }
+export async function dirSize(path: string): Promise<number> { try { return Number(await LS.dirSize(path)); } catch { return 0; } }
 export async function fileSize(path: string): Promise<number> { try { return Number(await LS.fileSize(path)); } catch { return -1; } }
 
 
@@ -108,8 +109,34 @@ export async function fileSize(path: string): Promise<number> { try { return Num
  * the blocks fetched so far stay in the local store), then writes the file.
  * Returns the content when it is small (≤ 1 MB: the index), else "".
  */
-export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void): Promise<string> {
+export type Progress = { phase: "downloading" | "saving"; bytes: number; total: number; rate: number };
+
+/** Poll `measure` every second while `work` runs; report bytes, total and a smoothed rate. Logs every 15 s. */
+async function watch<T>(work: Promise<T>, measure: () => Promise<number>, phase: Progress["phase"], total: number, onProgress?: (p: Progress) => void): Promise<T> {
+  if (!onProgress) return work;
+  let last = Math.max(0, await measure()), lastT = Date.now(), rate = 0, ticks = 0, done = false;
+  const tick = async () => {
+    while (!done) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (done) break;
+      const b = Math.max(last, await measure()), t = Date.now();
+      rate = rate ? 0.7 * rate + 0.3 * ((b - last) * 1000 / Math.max(1, t - lastT)) : (b - last) * 1000 / Math.max(1, t - lastT);
+      last = b; lastT = t;
+      onProgress({ phase, bytes: total ? Math.min(b, total) : b, total, rate: Math.max(0, rate) });
+      if (++ticks % 15 === 0) diag(`${phase} ${(b / 1048576).toFixed(1)}${total ? `/${(total / 1048576).toFixed(1)}` : ""} MB · ${(Math.max(0, rate) / 1024).toFixed(0)} KB/s`);
+    }
+  };
+  onProgress({ phase, bytes: total ? Math.min(last, total) : last, total, rate: 0 });
+  tick();
+  try { return await work; } finally { done = true; }
+}
+
+export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void, total = 0, onProgress?: (p: Progress) => void): Promise<string> {
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));
+  // One progress measure across both calls: blocks landing in the node's store (fetch) or the file
+  // growing (download_stream), whichever is further. Never goes backwards.
+  const store = `${await LS.filesDir()}/storage`, base = await dirSize(store);
+  const measure = async () => Math.max((await dirSize(store)) - base, await fileSize(path));
   for (const p of peers) {
     try { onStage?.("connecting"); diag(`connect ${p.peerId.slice(-8)} ${p.addrs.join(",")}`); await LS.connect(c, p.peerId, p.addrs); diag("connect ok"); }
     catch (e: any) { diag(`connect FAILED: ${e?.message ?? e}`); }
@@ -118,11 +145,11 @@ export async function getFile(cid: string, path: string, peers: Peer[], onStage?
   // manifest and then waits forever (verified on desktop). Scala's prebuilt arm64 libstorage crashed
   // inside fetch (SEGV on the phone and under arm64 translation); the library is now built fresh.
   for (let i = 1; ; i++) {
-    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await LS.fetch(c, cid); diag(`fetch ok ${String(m).slice(0, 120)}`); break; }
+    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await watch(LS.fetch(c, cid), measure, "downloading", total, onProgress); diag(`fetch ok ${String(m).slice(0, 120)}`); break; }
     catch (e: any) { diag(`fetch error: ${e?.message ?? e}`); if (!isTimeout(e) || i >= 3) throw e; }
   }
   for (let i = 1; ; i++) {
-    try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); diag(`download ${cid.slice(-10)} try ${i}`); const r = await LS.downloadToFile(c, cid, 65536, false, path); diag(`download ok (${await fileSize(path)} B)`); return r; }
+    try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); diag(`download ${cid.slice(-10)} try ${i}`); const r = await watch<string>(LS.downloadToFile(c, cid, 65536, false, path), measure, "saving", total, onProgress); diag(`download ok (${await fileSize(path)} B)`); return r; }
     catch (e: any) { diag(`download error: ${e?.message ?? e}`); if (!isTimeout(e) || i >= 5) throw e; }
   }
 }

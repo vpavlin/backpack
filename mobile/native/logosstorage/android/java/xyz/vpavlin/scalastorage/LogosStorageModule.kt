@@ -171,6 +171,17 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     catch (t: Throwable) { promise.resolve(-1.0) }
   }
 
+  // Total bytes under a directory (0 if missing). Backpack polls the node's data dir while a fetch
+  // runs: fetch writes blocks into the local store, not into a file, so this is its only progress signal.
+  // Runs on its own thread: the storage thread is busy with the fetch.
+  @ReactMethod
+  fun dirSize(path: String, promise: Promise) {
+    Thread {
+      try { promise.resolve(java.io.File(path).walkTopDown().filter { it.isFile }.sumOf { it.length() }.toDouble()) }
+      catch (t: Throwable) { promise.resolve(0.0) }
+    }.start()
+  }
+
   // App-internal writable dir — the base for libstorage's data-dir (no expo-file-system dep needed).
   @ReactMethod
   fun filesDir(promise: Promise) {

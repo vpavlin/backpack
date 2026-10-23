@@ -22,6 +22,7 @@ function Main() {
   const [link, setLink] = useState("");
   const [installed, setInstalled] = useState<Record<string, number>>({});
   const [stage, setStage] = useState<Record<string, string>>({}); // app id → install stage
+  const [prog, setProg] = useState<Record<string, storage.Progress>>({}); // app id → download progress
   const [icons, setIcons] = useState<Record<string, string>>({});
   const [showDiag, setShowDiag] = useState(false);
   const [diagTick, setDiagTick] = useState(0);
@@ -87,18 +88,15 @@ function Main() {
 
   const install = async (repo: R.Repo, app: R.App) => {
     const v = app.versions[0];
-    if (!(await R.installer.canInstall())) {
-      Alert.alert("Allow installs", "Android needs your permission for Backpack to install apps. Turn on \"Allow from this source\", then come back and tap Install again.",
-        [{ text: "Cancel", style: "cancel" }, { text: "Open settings", onPress: () => R.installer.openSettings() }]);
-      return;
-    }
     const set = (s: string | null) => setStage((m) => { const n = { ...m }; if (s) n[app.id] = s; else delete n[app.id]; return n; });
     try {
       set("starting");
-      const res = await R.install(repo, app, v, set);
+      const res = await R.install(repo, app, v, set, (p) => setProg((m) => ({ ...m, [app.id]: p })));
       if (res === "cancelled") Alert.alert("Not installed", "The install was cancelled.");
+      if (res === "needs-permission") Alert.alert("Allow installs", `${app.label} is downloaded and checked. Android needs your permission for Backpack to install apps: turn on "Allow from this source", then come back and tap Install again (it won't download again).`,
+        [{ text: "Later", style: "cancel" }, { text: "Open settings", onPress: () => R.installer.openSettings() }]);
     } catch (e: any) { Alert.alert(`Couldn't install ${app.label}`, String(e?.message ?? e)); }
-    finally { set(null); scanInstalled(repos); }
+    finally { set(null); setProg((m) => { const n = { ...m }; delete n[app.id]; return n; }); scanInstalled(repos); }
   };
 
   const remove = (r: R.Repo) => Alert.alert(`Remove "${r.name}"?`, "Apps you installed from it stay installed.", [
@@ -163,7 +161,8 @@ function Main() {
                   <View style={{ flex: 1 }}>
                     <Text style={s.appName} numberOfLines={1}>{a.label}</Text>
                     <Text style={s.appMeta} numberOfLines={1}>{v.versionName} · {mb(v.size)}{have >= 0 ? ` · installed ${have === v.versionCode ? "" : `(${have})`}` : ""}</Text>
-                    {st && <Text style={[s.appMeta, { color: C.accent }]}>{st}…</Text>}
+                    {st && !prog[a.id] && <Text style={[s.appMeta, { color: C.accent }]}>{st}…</Text>}
+                    {st && prog[a.id] && <ProgressBar p={prog[a.id]} stage={st} />}
                   </View>
                   <Pressable disabled={!!st} style={[action === "Open" ? s.btnGhost : s.btn, st && { opacity: 0.4 }]}
                     onPress={() => (action === "Open" ? R.installer.launch(a.id) : install(r, a))}>
@@ -179,7 +178,28 @@ function Main() {
   );
 }
 
+function ProgressBar({ p, stage }: { p: storage.Progress; stage: string }) {
+  const frac = p.total ? Math.min(1, p.bytes / p.total) : 0;
+  const left = p.rate > 512 && p.total ? Math.max(0, (p.total - p.bytes) / p.rate) : -1;
+  const eta = left < 0 ? "" : left < 90 ? ` · ${Math.ceil(left)} s left` : ` · ${Math.ceil(left / 60)} min left`;
+  // fetch returns once the manifest is in and the blocks mostly arrive during the write (download_stream),
+  // so both phases are "downloading" to the user; the bytes are measured where they land in each phase.
+  const busy = stage.startsWith("fetching") || stage.startsWith("writing");
+  const retry = / \(try \d+\)/.exec(stage)?.[0] ?? "";
+  const label = busy
+    ? `downloading${retry} ${mb(p.bytes)}${p.total ? ` / ${mb(p.total)} · ${Math.floor(frac * 100)}%` : ""} · ${(p.rate / 1024).toFixed(0)} KB/s${eta}`
+    : `${stage}…`;
+  return (
+    <View style={{ marginTop: 4 }}>
+      <View style={s.barBg}><View style={[s.barFg, { width: `${Math.round(frac * 100)}%` }]} /></View>
+      <Text style={[s.appMeta, { color: C.accent }]} numberOfLines={2}>{label}</Text>
+    </View>
+  );
+}
+
 const s = StyleSheet.create({
+  barBg: { height: 6, borderRadius: 3, backgroundColor: C.line, overflow: "hidden", marginBottom: 3 },
+  barFg: { height: 6, borderRadius: 3, backgroundColor: C.accent },
   root: { flex: 1, backgroundColor: C.bg },
   head: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.line },
   title: { flex: 1, color: C.text, fontSize: 22, fontWeight: "700" },

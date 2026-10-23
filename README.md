@@ -41,6 +41,7 @@ cd cli && npm install
 ./backpack.mjs import-fdroid http://host/fdroid/repo --fingerprint <repo cert sha256>
 ./backpack.mjs publish                               # seq+1, index → Storage, pointer → hosts, link + QR
 ./backpack.mjs verify --deep                         # check it all as a phone would
+./backpack.mjs rehost                                # re-upload old APKs with 512 KiB blocks (ADR 0006)
 ```
 
 Open the printed `backpack://` link on the phone, or scan the QR, once. After that the phone

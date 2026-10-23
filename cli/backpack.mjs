@@ -53,9 +53,16 @@ const envelope = (kind, bodyObj) => seal(kind, bodyObj, privKey());
 const openEnvelope = open;
 
 // ── Storage node REST ────────────────────────────────────────────────────────
+// Storage's block exchange pays roughly a round trip per block, so a far node delivers ~60-120 KB/s with
+// the default 64 KiB blocks; 512 KiB blocks (the maximum) measured 3.4x faster (ADR 0006). Small files
+// (index, icons) keep the default.
+const BIG_BLOCK = 524288;
+const blockSizeFor = (n) => (n > 1 << 20 ? BIG_BLOCK : 65536);
 async function upload(node, file, name, mime) {
-  const r = await fetch(`${node}/api/storage/v1/data`, {
-    method: "POST", body: fs.readFileSync(file),
+  const body = fs.readFileSync(file);
+  const q = blockSizeFor(body.length) === BIG_BLOCK ? `?blockSize=${BIG_BLOCK}` : "";
+  const r = await fetch(`${node}/api/storage/v1/data${q}`, {
+    method: "POST", body,
     headers: { "Content-Type": mime, "Content-Disposition": `attachment; filename="${name}"` },
   });
   if (!r.ok) die(`upload ${name}: HTTP ${r.status} ${await r.text()}`);
@@ -139,7 +146,7 @@ async function addApk(s, apk, meta = {}) {
   app.label = meta.name || app.label || m.label;
   for (const k of ["summary", "description", "license", "source"]) if (meta[k]) app[k] = meta[k];
   app.icon = iconCid;
-  app.versions = [{ versionCode: m.versionCode, versionName: m.versionName, size: bytes.length, sha256, signer, cid, minSdk: m.minSdk, abis: m.abis, added: new Date().toISOString() },
+  app.versions = [{ versionCode: m.versionCode, versionName: m.versionName, size: bytes.length, sha256, signer, cid, blockSize: blockSizeFor(bytes.length), minSdk: m.minSdk, abis: m.abis, added: new Date().toISOString() },
     ...app.versions.filter((v) => v.versionCode !== m.versionCode)].sort((a, b) => b.versionCode - a.versionCode).slice(0, KEEP_VERSIONS);
   console.log(cid);
   return true;
@@ -327,6 +334,22 @@ async function verifyCmd() {
   process.exit(fail ? 1 : 0);
 }
 
+/** Re-upload every kept APK whose blocks are still the 64 KiB default (ADR 0006): bytes from the node,
+ *  checked against the pinned SHA-256, uploaded again with 512 KiB blocks. Then `publish`. */
+async function rehost() {
+  const s = load(); let n = 0;
+  for (const a of Object.values(s.apps)) for (const v of a.versions) {
+    if (v.blockSize) continue;  // uploaded with the sizes above already
+    process.stdout.write(`${a.id} ${v.versionName} (${(v.size / 1e6).toFixed(1)} MB) → `);
+    const bytes = await download(s.node, v.cid);
+    if (sha256hex(bytes) !== v.sha256) die(`${a.id} ${v.versionName}: the node's copy doesn't match the pinned SHA-256`);
+    const t = path.join(tmpDir(), "re.apk"); fs.writeFileSync(t, bytes);
+    v.cid = await upload(s.node, t, `${a.id}_${v.versionCode}.apk`, "application/vnd.android.package-archive");
+    v.blockSize = blockSizeFor(bytes.length); n++; save(s); console.log(v.cid);
+  }
+  console.log(n ? `${n} version(s) re-uploaded; run \`backpack publish\`` : "nothing to re-upload");
+}
+
 function ls() {
   const s = load();
   console.log(`${s.name}  (key ${pubOf()}, seq ${s.seq ?? 0}, node ${s.node})`);
@@ -336,7 +359,7 @@ function ls() {
 }
 
 const cmd = args.shift();
-const run = { init, config, add, "import-fdroid": importFdroid, publish, verify: verifyCmd, ls }[cmd];
+const run = { init, config, add, "import-fdroid": importFdroid, publish, verify: verifyCmd, rehost, ls }[cmd];
 if (!run) {
   console.log(`usage: backpack [--repo NAME] <command>
   init --name N [--node URL]
@@ -345,6 +368,7 @@ if (!run) {
   import-fdroid <repo URL> --fingerprint SHA256 [--versions N] [--only pkg,pkg]
   publish
   verify [backpack://link] [--deep]
+  rehost                 re-upload APKs with 512 KiB blocks (faster downloads, ADR 0006)
   ls`);
   process.exit(cmd ? 1 : 0);
 }
