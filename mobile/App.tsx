@@ -79,6 +79,9 @@ function Main() {
   }, [scanInstalled, loadIcons]);
 
   const refreshAll = useCallback(async () => {
+    setBusy("Asking Logos Delivery…");
+    const rsNow = await R.loadRepos();
+    await delivery.pullAndWait(rsNow.map((r) => r.key));   // Store first: the note usually comes from there
     setBusy("Refreshing…");
     const out: R.Repo[] = [];
     for (const r of await R.loadRepos()) {

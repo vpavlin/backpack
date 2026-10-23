@@ -66,4 +66,7 @@ the highest valid `seq` from all of them.
   verified on a phone only.
 - Gotcha: `logosctl call … b64:<…>` does NOT decode base64 for a `bstr` argument; it sends the literal
   text. Pass the JSON with `str:`.
+- **Pull-to-refresh asks Store** (0.2.6): it triggers the Loam service's Store query for Backpack's
+  topics, waits up to 8 s for every repo's note to come back through the receive callback, then decides.
+  With the web switch off (the default since 0.2.5), no HTTP request is made at all.
 

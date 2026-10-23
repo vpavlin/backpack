@@ -19,6 +19,7 @@ let lastError = "";
 const keys = new Set<string>();
 const best = new Map<string, Pointer>();            // repo key → newest valid pointer seen over Delivery
 const via = new Map<string, "live" | "store">();    // how that pointer arrived
+const heard = new Map<string, number>();            // repo key → when a valid note last arrived (any seq)
 let listeningSince = 0;                             // a pointer signed before this came from Store, not live
 let onPointer: ((p: Pointer) => void) | null = null;
 
@@ -34,6 +35,7 @@ function receive(topic: string, candidates: Uint8Array[]): boolean {
     try {
       const p = openEnvelope<Pointer>(JSON.parse(new TextDecoder().decode(c)), key, "pointer");
       storage.diag(`delivery: pointer ${key.slice(0, 6)} seq ${p.seq}`);
+      heard.set(key, Date.now());
       const prev = best.get(key);
       if (!prev || p.seq > prev.seq) { best.set(key, p); via.set(key, Date.parse(p.created) < listeningSince ? "store" : "live"); onPointer?.(p); }
       return true;
@@ -78,4 +80,21 @@ export function pull(): void {
   Promise.resolve(T.storeSync(receive))
     .then((r: any) => storage.diag(`delivery: store pull done${r?.msgs !== undefined ? ` (${r.msgs} msgs)` : ""}`))
     .catch((e: any) => storage.diag(`delivery: store pull failed: ${e?.message ?? e}`));
+}
+
+/**
+ * Pull-to-refresh: ask Store again and wait (up to `ms`) until every given repo's note has come back.
+ * On the Loam shared node the Store query is fire-and-forget: Loam runs it and the results arrive
+ * through receive(), like live messages. (Loam skips a topic it pulled within the last minute; then
+ * the note we already hold is still the newest, and the wait just times out.)
+ */
+export async function pullAndWait(repoKeys: string[], ms = 8000): Promise<void> {
+  const since = Date.now();
+  while (state === "starting" && Date.now() - since < ms) await new Promise((r) => setTimeout(r, 250));   // first open: the node is still coming up
+  if (state !== "on" || !repoKeys.length) return;
+  pull();
+  while (Date.now() - since < ms) {
+    if (repoKeys.every((k) => (heard.get(k) ?? 0) >= since)) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
 }
