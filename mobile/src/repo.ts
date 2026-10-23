@@ -22,7 +22,10 @@ export interface Repo {
   seq?: number;            // highest seq accepted: never go below it (rollback protection)
   pointers?: string[];     // where to look for newer indexes (link u= + index.pointers)
   index?: Index; loadedCid?: string; fetchedAt?: string; checkedAt?: string; error?: string;
+  sources?: Source[];      // what each pointer source said at the last check
+  via?: string;            // the source of the pointer the current index came from
 }
+export interface Source { name: string; seq?: number; error?: string }
 
 const KEY = "backpack.repos.v1";
 
@@ -42,21 +45,34 @@ export async function loadRepos(): Promise<Repo[]> {
 }
 export async function saveRepos(r: Repo[]) { await AsyncStorage.setItem(KEY, JSON.stringify(r)); }
 
-/** Ask every pointer source; return the valid pointer with the highest seq (or null). Bad sources are skipped. */
-export async function newestPointer(repo: Repo): Promise<Pointer | null> {
-  // over Logos Delivery (ADR 0007), already verified when it arrived
-  let best: Pointer | null = delivery.pointerFor(repo.key) ?? null;
-  for (const url of uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])])) {
+/**
+ * Ask every pointer source at once — Logos Delivery (ADR 0007: live or from Store, already verified on
+ * arrival) and each HTTPS URL — and return the valid pointer with the highest seq, which source gave
+ * it, and what every source said (shown in the app, so it's clear where an update came from).
+ */
+export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null; via?: string; sources: Source[] }> {
+  const sources: Source[] = [];
+  const cands: { p: Pointer; name: string }[] = [];
+  const d = delivery.pointerFor(repo.key), ds = delivery.status();
+  if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
+  else sources.push({ name: "Delivery", error: ds.state === "on" ? "nothing yet" : ds.state === "unavailable" ? "Loam not available" : "starting" });
+  await Promise.all(uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])]).map(async (url) => {
+    const name = (() => { try { return new URL(url).host; } catch { return url; } })();
     try {
       const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 15000);
       const r = await fetch(url, { signal: ctl.signal, headers: { "Cache-Control": "no-cache" } }); clearTimeout(tm);
-      if (!r.ok) { storage.diag(`pointer ${url}: HTTP ${r.status}`); continue; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const p = openEnvelope<Pointer>(await r.json(), repo.key, "pointer");
-      storage.diag(`pointer ${url}: seq ${p.seq}`);
-      if (!best || p.seq > best.seq) best = p;
-    } catch (e: any) { storage.diag(`pointer ${url}: ${e?.message ?? e}`); }
-  }
-  return best;
+      storage.diag(`pointer ${name}: seq ${p.seq}`);
+      sources.push({ name, seq: p.seq }); cands.push({ p, name });
+    } catch (e: any) {
+      const msg = e?.name === "AbortError" ? "timed out" : String(e?.message ?? e);
+      storage.diag(`pointer ${name}: ${msg}`); sources.push({ name, error: msg });
+    }
+  }));
+  let top: { p: Pointer; name: string } | null = null;
+  for (const c of cands) if (!top || c.p.seq > top.p.seq) top = c;
+  return { best: top?.p ?? null, via: top?.name, sources };
 }
 
 /**
@@ -67,11 +83,11 @@ export async function newestPointer(repo: Repo): Promise<Pointer | null> {
 export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<Repo> {
   const have = repo.seq ?? 0;
   onStage?.("checking for updates");
-  const ptr = await newestPointer(repo);
+  const { best: ptr, via, sources } = await newestPointer(repo);
   let cid = repo.indexCid, expectSeq: number | null = null;
   if (ptr && ptr.seq > have) { cid = ptr.index; expectSeq = ptr.seq; }
   else if (repo.index && cid === repo.loadedCid) {
-    return { ...repo, checkedAt: new Date().toISOString(), error: undefined };   // nothing newer: no Storage traffic
+    return { ...repo, sources, checkedAt: new Date().toISOString(), error: undefined };   // nothing newer: no Storage traffic
   }
   const peers = uniq([...(ptr?.nodes ?? []), ...repo.peers].map((p) => JSON.stringify(p))).map((s) => JSON.parse(s));
   const dir = await storage.filesDir();
@@ -85,7 +101,8 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
     ...repo, name: index.name || repo.name, index, indexCid: cid, seq,
     peers: index.nodes?.length ? index.nodes : repo.peers,
     pointers: uniq([...(repo.pointers ?? []), ...(index.pointers ?? [])]),
-    loadedCid: cid, fetchedAt: now, checkedAt: now, error: undefined,
+    loadedCid: cid, fetchedAt: now, checkedAt: now, error: undefined, sources,
+    via: expectSeq !== null ? via : repo.via ?? "link",
   };
 }
 
@@ -128,6 +145,15 @@ export const installer = {
 
 export interface Update { repo: Repo; app: App; v: Version; from: number }
 
+// Versions the user cancelled while they downloaded automatically: not started again automatically
+// (the Update button still works). Keyed by package, newest skipped versionCode.
+const SKIP = "backpack.skipped.v1";
+export async function skipVersion(pkg: string, versionCode: number) {
+  const m = JSON.parse((await AsyncStorage.getItem(SKIP)) ?? "{}"); m[pkg] = Math.max(m[pkg] ?? 0, versionCode);
+  await AsyncStorage.setItem(SKIP, JSON.stringify(m));
+}
+async function skipped(): Promise<Record<string, number>> { try { return JSON.parse((await AsyncStorage.getItem(SKIP)) ?? "{}"); } catch { return {}; } }
+
 /**
  * Updates available for installed apps: across all repos, the newest version of each installed
  * package that is signed by a key the installed app already has (anything else Android would refuse,
@@ -135,9 +161,10 @@ export interface Update { repo: Repo; app: App; v: Version; from: number }
  */
 export async function pendingUpdates(repos: Repo[], installed: Record<string, number>): Promise<Update[]> {
   const best = new Map<string, Update>();
+  const skip = await skipped();
   for (const repo of repos) for (const app of repo.index?.apps ?? []) {
     const have = installed[app.id] ?? -1, v = app.versions[0];
-    if (have < 0 || !v || v.versionCode <= have || !v.signer) continue;
+    if (have < 0 || !v || v.versionCode <= have || !v.signer || (skip[app.id] ?? 0) >= v.versionCode) continue;
     const prev = best.get(app.id);
     if (prev && prev.v.versionCode >= v.versionCode) continue;
     if (!(await installer.installedSigners(app.id)).includes(v.signer)) continue;
@@ -164,7 +191,10 @@ export function publishersOf(repos: Repo[], pkg: string): { repo: Repo; signer?:
 export async function install(repo: Repo, app: App, v: Version, onStage: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<string> {
   const path = `${await storage.filesDir()}/apks/${app.id}_${v.versionCode}.apk`;
   const have = await storage.fileSize(path);
-  if (have !== v.size) await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress);
+  if (have !== v.size) {
+    try { await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress); }
+    catch (e) { if (storage.isCancelled(e)) { await Installer.deleteFile(path); return "download-cancelled"; } throw e; }
+  }
   onStage("checking");
   const sha = await Installer.sha256(path);
   if (sha !== v.sha256) { await Installer.deleteFile(path); throw new Error("the downloaded APK doesn't match the repo's checksum"); }

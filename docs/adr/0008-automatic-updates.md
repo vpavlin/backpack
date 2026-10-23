@@ -21,6 +21,17 @@
 - **Uninstall** opens Android's own uninstall dialog (`REQUEST_DELETE_PACKAGES`).
 - Each repo header shows its publisher key, so two repos with the same name can be told apart.
 
+- **Cancel** (0.2.4): while an app downloads, its button is Cancel. It calls libstorage's
+  `storage_download_cancel` from a second thread (the storage thread is the one blocked in the
+  download), stops the retries, deletes the partial file and drops the CID's blocks. A cancelled
+  *automatic* update is remembered per package and version and not started again by itself; the
+  Update button still works.
+- **Where updates come from** (0.2.4): every source is asked at once (Delivery, each HTTPS URL).
+  Under each repo the app shows what each one said and which one the current index came from, e.g.
+  `#7 came from Delivery (store) · Delivery (store) ✓ #7 · data.vpavlin.xyz ✗ timed out`.
+  "store" means the pointer was signed before Backpack started listening, so it came from Store;
+  "live" means it arrived while listening.
+
 ## Not yet
 
 - A setting to limit automatic downloads to Wi-Fi.

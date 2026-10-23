@@ -18,10 +18,13 @@ let state: "off" | "starting" | "on" | "unavailable" = "off";
 let lastError = "";
 const keys = new Set<string>();
 const best = new Map<string, Pointer>();            // repo key → newest valid pointer seen over Delivery
+const via = new Map<string, "live" | "store">();    // how that pointer arrived
+let listeningSince = 0;                             // a pointer signed before this came from Store, not live
 let onPointer: ((p: Pointer) => void) | null = null;
 
 /** Newest pointer for `key` received over Delivery (live or from Store), if any. */
 export function pointerFor(key: string): Pointer | undefined { return best.get(key); }
+export function arrivedVia(key: string): "live" | "store" | undefined { return via.get(key); }
 export function status(): { state: typeof state; error: string } { return { state, error: lastError }; }
 
 function receive(topic: string, candidates: Uint8Array[]): boolean {
@@ -32,7 +35,7 @@ function receive(topic: string, candidates: Uint8Array[]): boolean {
       const p = openEnvelope<Pointer>(JSON.parse(new TextDecoder().decode(c)), key, "pointer");
       storage.diag(`delivery: pointer ${key.slice(0, 6)} seq ${p.seq}`);
       const prev = best.get(key);
-      if (!prev || p.seq > prev.seq) { best.set(key, p); onPointer?.(p); }
+      if (!prev || p.seq > prev.seq) { best.set(key, p); via.set(key, Date.parse(p.created) < listeningSince ? "store" : "live"); onPointer?.(p); }
       return true;
     } catch { /* not ours, not valid, or another candidate decoding: try the next */ }
   }
@@ -56,7 +59,7 @@ export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promi
       if (fresh.length) { await T.join(fresh.map(topicFor)); pull(); }
       return;
     }
-    state = "starting";
+    state = "starting"; listeningSince = Date.now();
     // must come before anything that wires the transport backend (loam-integrate-app §2)
     T.preferServiceBackend(true, APP_ID);
     await T.start({ deviceId: await deviceId(), topics: [...keys].map(topicFor), onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
@@ -72,5 +75,7 @@ export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promi
 /** Ask Store for what was published while we weren't listening (the latest pointer per repo). */
 export function pull(): void {
   if (state !== "on") return;
-  Promise.resolve(T.storeSync(receive)).catch((e: any) => storage.diag(`delivery: store pull failed: ${e?.message ?? e}`));
+  Promise.resolve(T.storeSync(receive))
+    .then((r: any) => storage.diag(`delivery: store pull done${r?.msgs !== undefined ? ` (${r.msgs} msgs)` : ""}`))
+    .catch((e: any) => storage.diag(`delivery: store pull failed: ${e?.message ?? e}`));
 }

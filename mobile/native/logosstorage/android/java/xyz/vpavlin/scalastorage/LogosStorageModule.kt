@@ -63,6 +63,8 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
   external fun storageConnect(ctx: Long, peerId: String, addrs: Array<String>): String
   external fun storageExists(ctx: Long, cid: String): String
   external fun storageFetch(ctx: Long, cid: String): String
+  external fun storageDownloadCancel(ctx: Long, cid: String): String
+  external fun storageDelete(ctx: Long, cid: String): String
   external fun storageDownloadInit(ctx: Long, cid: String, chunkSize: Long, local: Boolean): String
   external fun storageDownloadStream(ctx: Long, cid: String, chunkSize: Long, local: Boolean, filePath: String): String
 
@@ -121,6 +123,14 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     }
   }
   @ReactMethod fun exists(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_exists") { storageExists(BigInteger(ctx).toLong(), cid) }
+  // Cancel runs on the diag thread: the storage thread is the one blocked in the download it cancels.
+  @ReactMethod fun downloadCancel(ctx: String, cid: String, promise: Promise) {
+    diagThread.execute {
+      try { promise.resolve(storageDownloadCancel(BigInteger(ctx).toLong(), cid)) }
+      catch (t: Throwable) { promise.reject("storage_download_cancel", t.message ?: "cancel failed") }
+    }
+  }
+  @ReactMethod fun delete(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_delete") { storageDelete(BigInteger(ctx).toLong(), cid) }
   @ReactMethod fun fetch(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_fetch") { storageFetch(BigInteger(ctx).toLong(), cid) }
 
   @ReactMethod

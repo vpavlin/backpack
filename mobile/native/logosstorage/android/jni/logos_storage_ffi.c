@@ -208,6 +208,10 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_##NAME(JNIEnv *env, jobject thi
     return js;                                                                                   \
 }
 DEFINE_CID_CALL(storageExists, storage_exists)
+// Cancel a running download of `cid` (its download_stream then returns with an error), and drop a
+// CID's blocks from the local store (a cancelled download's partial blocks).
+DEFINE_CID_CALL(storageDownloadCancel, storage_download_cancel)
+DEFINE_CID_CALL(storageDelete, storage_delete)
 // fetch (libstorage >= PR #1540): isPrivate=false, advertise=false — a fetch-only client neither
 // hides from nor advertises to the DHT.
 JNIEXPORT jstring JNICALL

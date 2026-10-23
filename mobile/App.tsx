@@ -33,6 +33,9 @@ function Main() {
   // Live pointers over Logos Delivery (ADR 0007): a newer seq than we hold → refresh (and auto-update).
   const listen = (rs: R.Repo[]) => delivery.watch(rs.map((r) => r.key), async (p) => {
     const have = (await R.loadRepos()).find((r) => r.key === p.key)?.seq ?? 0;
+    // show it in the repo's sources line right away, newer or not
+    const name = `Delivery (${delivery.arrivedVia(p.key) ?? "live"})`;
+    setRepos((cur) => cur.map((r) => r.key !== p.key ? r : { ...r, sources: [{ name, seq: p.seq }, ...(r.sources ?? []).filter((x) => !x.name.startsWith("Delivery"))] }));
     if (p.seq > have && !updatingRef.current) refreshRef.current?.();
   });
   const refreshRef = useRef<(() => void) | null>(null);
@@ -93,6 +96,7 @@ function Main() {
     // (opened by a link: adding it refreshes that repo — don't race it with a refresh of all)
     Promise.all([R.loadRepos(), Linking.getInitialURL()]).then(([rs, u]) => {
       setRepos(rs); scanInstalled(rs); loadIcons(rs);
+      if (rs.length) listen(rs);   // start Delivery first: its Store pull runs while the web sources answer
       if (u && u.startsWith("backpack://repo")) add(u);
       else if (rs.length) refreshAll();
     });
@@ -122,6 +126,10 @@ function Main() {
     return res;
   };
 
+  // Cancel a running download (the stages before "checking": nothing is installed yet).
+  const cancelDownload = (app: R.App) => { const v = app.versions[0]; if (v) storage.cancel(v.cid); };
+  const cancellable = (st?: string) => !!st && !/^(checking|installing)/.test(st);
+
   // After every refresh: download and install updates for installed apps, one at a time. Android asks
   // to confirm each one, except for apps Backpack itself installed (Android 12+ updates those silently).
   const autoUpdate = async (rs: R.Repo[], inst: Record<string, number>) => {
@@ -134,6 +142,7 @@ function Main() {
         setUpdating(`Updating ${u.app.label} to ${u.v.versionName}${ups.length > 1 ? ` (${i + 1} of ${ups.length})` : ""}…`);
         const res = await install(u.repo, u.app, true);
         if (res === "needs-permission") break;   // install() already explained; the rest would ask again
+        if (res === "download-cancelled") await R.skipVersion(u.app.id, u.v.versionCode);   // don't start it again by itself
       }
     } finally { updatingRef.current = false; setUpdating(null); }
   };
@@ -191,6 +200,12 @@ function Main() {
               <Text style={s.repoName}>{r.name}</Text>
               <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
               <Text style={s.repoKey}>publisher key {keyShort(r.key)}</Text>
+              {!!r.sources?.length && (
+                <Text style={s.repoKey}>
+                  {r.via ? `#${r.seq ?? 0} came from ${r.via} · ` : ""}
+                  {r.sources.map((x) => `${x.name} ${x.error ? `✗ ${x.error}` : `✓ #${x.seq}`}`).join(" · ")}
+                </Text>
+              )}
             </Pressable>
             {r.error && <Text style={[s.hint, { color: C.err }]}>{r.error}</Text>}
             {(r.index?.apps ?? []).map((a) => {
@@ -205,10 +220,14 @@ function Main() {
                     {st && !prog[a.id] && <Text style={[s.appMeta, { color: C.accent }]}>{st}…</Text>}
                     {st && prog[a.id] && <ProgressBar p={prog[a.id]} stage={st} />}
                   </View>
-                  <Pressable disabled={!!st} style={[action === "Open" ? s.btnGhost : s.btn, st && { opacity: 0.4 }]}
-                    onPress={() => (action === "Open" ? R.installer.launch(a.id) : install(r, a))}>
-                    {st ? <ActivityIndicator color={C.bg} size="small" /> : <Text style={action === "Open" ? s.btnGhostT : s.btnT}>{action}</Text>}
-                  </Pressable>
+                  {cancellable(st) ? (
+                    <Pressable style={s.btnGhost} onPress={() => cancelDownload(a)}><Text style={[s.btnGhostT, { color: C.err }]}>Cancel</Text></Pressable>
+                  ) : (
+                    <Pressable disabled={!!st} style={[action === "Open" ? s.btnGhost : s.btn, st && { opacity: 0.4 }]}
+                      onPress={() => (action === "Open" ? R.installer.launch(a.id) : install(r, a))}>
+                      {st ? <ActivityIndicator color={C.bg} size="small" /> : <Text style={action === "Open" ? s.btnGhostT : s.btnT}>{action}</Text>}
+                    </Pressable>
+                  )}
                 </Pressable>
               );
             })}
@@ -220,7 +239,7 @@ function Main() {
         <Modal visible animationType="slide" onRequestClose={() => setDetail(null)}>
           <AppDetail repo={detail.repo} app={detail.app} repos={repos} icon={icons[detail.app.id]} have={installed[detail.app.id] ?? -1}
             stage={stage[detail.app.id]} prog={prog[detail.app.id]} onClose={() => setDetail(null)}
-            onInstall={() => install(detail.repo, detail.app)} />
+            onInstall={() => install(detail.repo, detail.app)} onCancel={cancellable(stage[detail.app.id]) ? () => cancelDownload(detail.app) : undefined} />
         </Modal>
       )}
     </SafeAreaView>
@@ -230,9 +249,9 @@ function Main() {
 const keyShort = (k: string) => `${k.slice(0, 6)}…${k.slice(-4)}`;
 const certShort = (h?: string) => (h ? `${h.slice(0, 8)}…${h.slice(-8)}` : "not pinned");
 
-function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInstall }: {
+function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInstall, onCancel }: {
   repo: R.Repo; app: R.App; repos: R.Repo[]; icon?: string; have: number; stage?: string; prog?: storage.Progress;
-  onClose: () => void; onInstall: () => void;
+  onClose: () => void; onInstall: () => void; onCancel?: () => void;
 }) {
   const v = app.versions[0];
   const [installedBy, setInstalledBy] = useState<string>("");
@@ -262,7 +281,8 @@ function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInsta
         {stage && prog && <ProgressBar p={prog} stage={stage} />}
         {stage && !prog && <Text style={[s.appMeta, { color: C.accent }]}>{stage}…</Text>}
         <View style={[s.row, { marginVertical: 12 }]}>
-          {action && <Pressable disabled={!!stage} style={[s.btn, { flex: 1, marginRight: 8 }, stage && { opacity: 0.4 }]} onPress={onInstall}><Text style={s.btnT}>{action}</Text></Pressable>}
+          {onCancel && <Pressable style={[s.btnGhost, { flex: 1, marginRight: 8 }]} onPress={onCancel}><Text style={[s.btnGhostT, { color: C.err }]}>Cancel download</Text></Pressable>}
+          {action && !onCancel && <Pressable disabled={!!stage} style={[s.btn, { flex: 1, marginRight: 8 }, stage && { opacity: 0.4 }]} onPress={onInstall}><Text style={s.btnT}>{action}</Text></Pressable>}
           {have >= 0 && <Pressable style={[s.btnGhost, { flex: 1, marginRight: 8 }]} onPress={() => R.installer.launch(app.id)}><Text style={s.btnGhostT}>Open</Text></Pressable>}
           {have >= 0 && <Pressable style={[s.btnGhost, { flex: 1 }]} onPress={() => R.installer.uninstall(app.id)}><Text style={[s.btnGhostT, { color: C.err }]}>Uninstall</Text></Pressable>}
         </View>

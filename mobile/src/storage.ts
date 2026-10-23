@@ -131,13 +131,38 @@ async function watch<T>(work: Promise<T>, measure: () => Promise<number>, phase:
   try { return await work; } finally { done = true; }
 }
 
+// ── cancelling a download ────────────────────────────────────────────────────
+// The download runs inside one blocking native call on the storage thread; cancel() asks libstorage
+// to drop it (storage_download_cancel, on another thread), which makes that call return with an error.
+// The flag stops getFile's retries and turns the error into CANCELLED.
+const cancelled = new Set<string>();
+export const CANCELLED = "download cancelled";
+export const isCancelled = (e: unknown) => String((e as any)?.message ?? e) === CANCELLED;
+export async function cancel(cid: string): Promise<void> {
+  cancelled.add(cid);
+  diag(`cancel ${cid.slice(-10)}`);
+  if (ctx) { try { await LS.downloadCancel(ctx, cid); } catch (e: any) { diag(`cancel: ${e?.message ?? e}`); } }
+}
+function checkCancel(cid: string) { if (cancelled.has(cid)) throw new Error(CANCELLED); }
+async function dropBlocks(c: string, cid: string) { try { await LS.delete(c, cid); } catch { /* best effort: the data dir is wiped at launch anyway */ } }
+
 export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void, total = 0, onProgress?: (p: Progress) => void): Promise<string> {
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));
+  try { const r = await getFileOn(c, cid, path, peers, onStage, total, onProgress); cancelled.delete(cid); return r; }
+  catch (e) {
+    if (!cancelled.has(cid)) throw e;
+    cancelled.delete(cid); dropBlocks(c, cid);
+    throw new Error(CANCELLED);
+  }
+}
+
+async function getFileOn(c: string, cid: string, path: string, peers: Peer[], onStage: ((s: string) => void) | undefined, total: number, onProgress?: (p: Progress) => void): Promise<string> {
   // One progress measure across both calls: blocks landing in the node's store (fetch) or the file
   // growing (download_stream), whichever is further. Never goes backwards.
   const store = `${await LS.filesDir()}/storage`, base = await dirSize(store);
   const measure = async () => Math.max((await dirSize(store)) - base, await fileSize(path));
   for (const p of peers) {
+    checkCancel(cid);
     try { onStage?.("connecting"); diag(`connect ${p.peerId.slice(-8)} ${p.addrs.join(",")}`); await LS.connect(c, p.peerId, p.addrs); diag("connect ok"); }
     catch (e: any) { diag(`connect FAILED: ${e?.message ?? e}`); }
   }
@@ -145,11 +170,13 @@ export async function getFile(cid: string, path: string, peers: Peer[], onStage?
   // manifest and then waits forever (verified on desktop). Scala's prebuilt arm64 libstorage crashed
   // inside fetch (SEGV on the phone and under arm64 translation); the library is now built fresh.
   for (let i = 1; ; i++) {
+    checkCancel(cid);
     try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await watch(LS.fetch(c, cid), measure, "downloading", total, onProgress); diag(`fetch ok ${String(m).slice(0, 120)}`); break; }
-    catch (e: any) { diag(`fetch error: ${e?.message ?? e}`); if (!isTimeout(e) || i >= 3) throw e; }
+    catch (e: any) { diag(`fetch error: ${e?.message ?? e}`); checkCancel(cid); if (!isTimeout(e) || i >= 3) throw e; }
   }
   for (let i = 1; ; i++) {
+    checkCancel(cid);
     try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); diag(`download ${cid.slice(-10)} try ${i}`); const r = await watch<string>(LS.downloadToFile(c, cid, 65536, false, path), measure, "saving", total, onProgress); diag(`download ok (${await fileSize(path)} B)`); return r; }
-    catch (e: any) { diag(`download error: ${e?.message ?? e}`); if (!isTimeout(e) || i >= 5) throw e; }
+    catch (e: any) { diag(`download error: ${e?.message ?? e}`); checkCancel(cid); if (!isTimeout(e) || i >= 5) throw e; }
   }
 }
