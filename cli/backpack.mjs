@@ -12,7 +12,7 @@
 //
 // State: ~/.backpack/<repo>/repo.json (+ key.pem, 0600). The node is a Logos Storage node's REST API
 // (no auth: use one reachable only by you — the mesh or localhost).
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
+import { randomUUID, createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { seal, open } from "./envelope.mjs";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -125,6 +125,9 @@ async function addApk(s, apk, meta = {}) {
   const bytes = fs.readFileSync(apk);
   const sha256 = sha256hex(bytes);
   if (meta.expectSha256 && meta.expectSha256 !== sha256) throw new Error(`${m.id} ${m.versionCode}: SHA-256 differs from the source index`);
+  if (meta.expectId && meta.expectId !== m.id) throw new Error(`the APK is ${m.id}, but the source index says ${meta.expectId}`);
+  if (meta.expectVersionCode !== undefined && meta.expectVersionCode !== m.versionCode) throw new Error(`${m.id}: the APK is versionCode ${m.versionCode}, the source index says ${meta.expectVersionCode}`);
+  if (!PKG_RE.test(m.id)) throw new Error(`${m.id}: not a valid package name`);
   const signer = apkSigner(apk);
   if (meta.expectSigner && meta.expectSigner !== signer) throw new Error(`${m.id} ${m.versionCode}: signer ${signer.slice(0, 8)}… differs from the source index ${meta.expectSigner.slice(0, 8)}…`);
   const app = (s.apps[m.id] ??= { id: m.id, label: m.label, icon: null, versions: [] });
@@ -189,7 +192,21 @@ async function add() {
   console.log("recorded; run `backpack publish` to make it visible");
 }
 
-// F-Droid repo → this repo, only through a verified index-v1.jar (ADR 0004).
+// F-Droid repo → this repo, only through a verified F-Droid **v2** index (ADR 0004, amended after the
+// 2026-10-23 audit). entry.jar is signed with SHA-256 and verifies with the JDK's stock settings (the v1
+// index-v1.jar needed SHA-1, and the old workaround re-enabled every disabled JAR algorithm, MD5 included:
+// audit BP-3). entry.json pins index-v2.json by SHA-256; index-v2 pins every icon and APK by SHA-256.
+// Nothing from the index is ever used as a local path (audit BP-1): files go to generated names.
+const SAFE_REMOTE = /^\/?[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;   // no "..", no leading dots, no backslashes
+const PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
+async function fetchChecked(url, sha, maxBytes) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (maxBytes && buf.length > maxBytes) throw new Error(`${buf.length} bytes, over the ${maxBytes} limit`);
+  if (sha && sha256hex(buf) !== sha) throw new Error("SHA-256 doesn't match the signed index");
+  return buf;
+}
 async function importFdroid() {
   const s = load();
   const fingerprint = (opt("fingerprint", null) ?? die("--fingerprint <sha256 of the F-Droid repo cert> is required")).replace(/[: ]/g, "").toLowerCase();
@@ -197,50 +214,66 @@ async function importFdroid() {
   const only = (opt("only", "") || "").split(",").filter(Boolean);
   const repoUrl = (args[0] ?? die("import-fdroid <repo URL> --fingerprint …")).replace(/\/+$/, "");
   const t = tmpDir();
-  const jar = path.join(t, "index-v1.jar");
-  const r = await fetch(`${repoUrl}/index-v1.jar`);
-  if (!r.ok) die(`${repoUrl}/index-v1.jar: HTTP ${r.status}`);
+  const jar = path.join(t, "entry.jar");
+  const r = await fetch(`${repoUrl}/entry.jar`);
+  if (!r.ok) die(`${repoUrl}/entry.jar: HTTP ${r.status} (Backpack imports only F-Droid v2 repos)`);
   fs.writeFileSync(jar, Buffer.from(await r.arrayBuffer()));
-  // 1. the JAR signature must verify, and its certificate must be the one the user vouched for
+  // 1. entry.jar must verify with the JDK's DEFAULT algorithm policy, signed by the cert the user vouched for
   let ver;
-  // F-Droid signs index-v1.jar with SHA1withRSA, which current JDKs disable; the F-Droid client still accepts
-  // it, so we re-enable the legacy algorithms for THIS verification only (ADR 0004 notes the caveat).
-  const sec = path.join(t, "java.security"); fs.writeFileSync(sec, "jdk.jar.disabledAlgorithms=\njdk.security.legacyAlgorithms=\n");
-  try { ver = execFileSync("jarsigner", [`-J-Djava.security.properties=${sec}`, "-verify", jar], { encoding: "utf8" }); } catch (e) { die(`index-v1.jar does not verify: ${e.stdout || e.message}`); }
-  if (!/jar verified/.test(ver)) die(`index-v1.jar does not verify:\n${ver}`);
-  const certs = execFileSync("keytool", [`-J-Djava.security.properties=${sec}`, "-printcert", "-jarfile", jar], { encoding: "utf8" });
+  try { ver = execFileSync("jarsigner", ["-verify", jar], { encoding: "utf8" }); } catch (e) { die(`entry.jar does not verify: ${e.stdout || e.message}`); }
+  if (!/jar verified/.test(ver)) die(`entry.jar does not verify:\n${ver}`);
+  const certs = execFileSync("keytool", ["-printcert", "-jarfile", jar], { encoding: "utf8" });
   const fps = [...certs.matchAll(/SHA256: ([0-9A-F:]+)/g)].map((m) => m[1].replace(/:/g, "").toLowerCase());
-  if (!fps.includes(fingerprint)) die(`index-v1.jar is signed by ${fps.join(", ") || "nobody"}, not ${fingerprint}`);
-  const index = JSON.parse(execFileSync("unzip", ["-p", jar, "index-v1.json"], { maxBuffer: 256 << 20, encoding: "utf8" }));
-  console.log(`verified F-Droid index "${index.repo?.name}" (${fingerprint.slice(0, 16)}…), ${index.apps.length} apps`);
+  if (fps.length !== 1 || fps[0] !== fingerprint) die(`entry.jar is signed by ${fps.join(", ") || "nobody"}, not ${fingerprint}`);
+  const entry = JSON.parse(execFileSync("unzip", ["-p", jar, "entry.json"], { maxBuffer: 1 << 20, encoding: "utf8" }));
+  // 2. index-v2.json, pinned by entry.json
+  const ix = entry.index ?? die("entry.json has no index");
+  if (!SAFE_REMOTE.test(ix.name ?? "") || !/^[0-9a-f]{64}$/.test(ix.sha256 ?? "")) die("entry.json: bad index name or hash");
+  let index;
+  try { index = JSON.parse((await fetchChecked(`${repoUrl}/${ix.name.replace(/^\//, "")}`, ix.sha256, 64 << 20)).toString("utf8")); }
+  catch (e) { die(`index-v2.json: ${e.message}`); }
+  const pkgsAll = Object.entries(index.packages ?? {});
+  const repoName = index.repo?.name?.["en-US"] ?? index.repo?.name;
+  console.log(`verified F-Droid v2 index "${typeof repoName === "string" ? repoName : "?"}" (${fingerprint.slice(0, 16)}…), ${pkgsAll.length} apps`);
+  const loc = (o) => (o && typeof o === "object" ? (o["en-US"] ?? o.en ?? Object.values(o)[0]) : o);
   let added = 0;
-  for (const a of index.apps) {
-    if (only.length && !only.includes(a.packageName)) continue;
-    const loc = a.localized?.["en-US"] ?? a.localized?.en ?? {};
+  for (const [pkg, p] of pkgsAll) {
+    if (only.length && !only.includes(pkg)) continue;
+    if (!PKG_RE.test(pkg)) { console.log(`${String(pkg).slice(0, 60)}: skipped (not a package name)`); continue; }
+    const md = p.metadata ?? {};
+    const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : undefined);
     const meta = {
-      name: loc.name ?? a.name, summary: loc.summary ?? a.summary, description: loc.description ?? a.description,
-      license: a.license, source: a.sourceCode || a.webSite || undefined,
+      name: str(loc(md.name), 100), summary: str(loc(md.summary), 300), description: str(loc(md.description), 8000),
+      license: str(md.license, 100), source: [md.sourceCode, md.webSite].find((u) => typeof u === "string" && /^https?:\/\//.test(u)),
     };
-    // icon: the repo's own icon set, best density first
-    for (const d of ["icons-640", "icons-480", "icons-320", "icons-240", "icons"]) {
-      if (!a.icon) break;
-      const ir = await fetch(`${repoUrl}/${d}/${a.icon}`);
-      if (ir.ok) { meta.iconFile = path.join(t, a.icon); fs.writeFileSync(meta.iconFile, Buffer.from(await ir.arrayBuffer())); break; }
+    // icon: pinned by SHA-256 in the index, written to a generated name
+    const icon = loc(md.icon);
+    if (icon && SAFE_REMOTE.test(icon.name ?? "") && /^[0-9a-f]{64}$/.test(icon.sha256 ?? "")) {
+      try {
+        const buf = await fetchChecked(`${repoUrl}/${icon.name.replace(/^\//, "")}`, icon.sha256, 1 << 20);
+        meta.iconFile = path.join(t, `icon-${randomUUID()}${icon.name.endsWith(".webp") ? ".webp" : ".png"}`);
+        fs.writeFileSync(meta.iconFile, buf);
+      } catch (e) { console.log(`${pkg}: icon skipped (${e.message})`); }
     }
-    const pkgs = (index.packages[a.packageName] ?? []).sort((x, y) => y.versionCode - x.versionCode).slice(0, versions);
-    for (const p of pkgs.reverse()) {
-      if ((p.hashType ?? "sha256") !== "sha256") { console.log(`${a.packageName} ${p.versionCode}: skipped (hash type ${p.hashType})`); continue; }
-      const have = s.apps[a.packageName]?.versions.find((v) => v.versionCode === p.versionCode && v.sha256 === p.hash && v.signer);
-      if (have) { console.log(`${a.packageName} ${p.versionName} (${p.versionCode}) already in the repo`); continue; }
-      const apk = path.join(t, p.apkName);
-      const ar = await fetch(`${repoUrl}/${encodeURIComponent(p.apkName)}`);
-      if (!ar.ok) { console.log(`${a.packageName} ${p.versionCode}: download failed (HTTP ${ar.status})`); continue; }
-      fs.writeFileSync(apk, Buffer.from(await ar.arrayBuffer()));
-      try { if (await addApk(s, apk, { ...meta, expectSha256: p.hash, expectSigner: p.signer })) added++; }
-      catch (e) { console.log(`${a.packageName} ${p.versionCode}: NOT imported — ${e.message}`); }
-      fs.rmSync(apk);
+    const vs = Object.values(p.versions ?? {}).filter((v) => v?.manifest && Number.isInteger(v.manifest.versionCode))
+      .sort((x, y) => y.manifest.versionCode - x.manifest.versionCode).slice(0, versions);
+    for (const v of vs.reverse()) {
+      const vc = v.manifest.versionCode, f = v.file ?? {};
+      const signer = v.manifest.signer?.sha256?.[0];
+      if (!SAFE_REMOTE.test(f.name ?? "") || !/^[0-9a-f]{64}$/.test(f.sha256 ?? "") || !/^[0-9a-f]{64}$/.test(signer ?? "")) {
+        console.log(`${pkg} ${vc}: skipped (bad file name, hash or signer in the index)`); continue;
+      }
+      const have = s.apps[pkg]?.versions.find((x) => x.versionCode === vc && x.sha256 === f.sha256 && x.signer);
+      if (have) { console.log(`${pkg} ${v.manifest.versionName} (${vc}) already in the repo`); continue; }
+      const apk = path.join(t, `apk-${randomUUID()}.apk`);   // generated: never a path from the index
+      try {
+        fs.writeFileSync(apk, await fetchChecked(`${repoUrl}/${f.name.replace(/^\//, "")}`, f.sha256, 512 << 20));
+        if (await addApk(s, apk, { ...meta, expectSha256: f.sha256, expectSigner: signer, expectId: pkg, expectVersionCode: vc })) added++;
+      } catch (e) { console.log(`${pkg} ${vc}: NOT imported — ${e.message}`); }
+      fs.rmSync(apk, { force: true });
       save(s);
     }
+    if (meta.iconFile) fs.rmSync(meta.iconFile, { force: true });
   }
   save(s);
   console.log(`${added} version(s) imported; run \`backpack publish\` to make them visible`);
@@ -325,16 +358,22 @@ async function verifyCmd() {
     if (best.seq >= 0 && (body.seq ?? 0) !== best.seq) bad(`index seq ${body.seq} ≠ pointer seq ${best.seq}`);
   } catch (e) { bad(`index ${best.index}: ${e.message}`); }
   if (body && deep) {
-    for (const a of body.apps) {
-      const v = a.versions[0];
+    // every version phones can see (audit BP-14): bytes, SHA-256, pinned signer (required: BP-6), and the
+    // APK's own package name and versionCode against the index entry (BP-5)
+    for (const a of body.apps) for (const v of a.versions) {
       try {
+        if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("no pinned signer: phones refuse to install it");
         const bytes = await download(node, v.cid);
         if (bytes.length !== v.size) throw new Error(`size ${bytes.length} ≠ ${v.size}`);
         if (sha256hex(bytes) !== v.sha256) throw new Error("SHA-256 mismatch");
         const t = path.join(tmpDir(), "a.apk"); fs.writeFileSync(t, bytes);
         const signer = apkSigner(t);
-        if (v.signer && signer !== v.signer) throw new Error(`signer ${signer.slice(0, 8)}… ≠ pinned ${v.signer.slice(0, 8)}…`);
-        console.log(`✓ ${a.id} ${v.versionName}: sha256 ok, signer ${signer.slice(0, 8)}…${v.signer ? " (pinned)" : " (not pinned)"}`);
+        if (signer !== v.signer) throw new Error(`signer ${signer.slice(0, 8)}… ≠ pinned ${v.signer.slice(0, 8)}…`);
+        const m = badging(t);
+        if (m.id !== a.id) throw new Error(`the APK is ${m.id}, the index says ${a.id}`);
+        if (m.versionCode !== v.versionCode) throw new Error(`the APK is versionCode ${m.versionCode}, the index says ${v.versionCode}`);
+        console.log(`✓ ${a.id} ${v.versionName}: sha256, signer ${signer.slice(0, 8)}…, package and versionCode ok`);
+        fs.rmSync(t, { force: true });
       } catch (e) { bad(`${a.id} ${v.versionName}: ${e.message}`); }
     }
   }
