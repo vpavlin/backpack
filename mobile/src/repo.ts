@@ -141,8 +141,10 @@ export async function pendingUpdates(repos: Repo[], installed: Record<string, nu
     if (!(await installer.installedSigners(app.id)).includes(v.signer)) continue;
     best.set(app.id, { repo, app, v, from: have });
   }
-  return [...best.values()];
+  // Backpack last: installing its own update restarts it, which would cut the rest of the queue short.
+  return [...best.values()].sort((a, b) => Number(a.app.id === SELF) - Number(b.app.id === SELF));
 }
+const SELF = "xyz.vpavlin.backpack";
 
 /** Every repo that lists `pkg`, with the signer of its newest version: lets the app warn when two
  *  repos publish the same package under different keys (only one of them can be the real one). */
