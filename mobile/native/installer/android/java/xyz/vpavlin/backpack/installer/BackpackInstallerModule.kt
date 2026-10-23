@@ -27,7 +27,6 @@ import java.security.MessageDigest
 class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactContextBaseJavaModule(rc) {
   override fun getName() = "BackpackInstaller"
 
-  private val action get() = rc.packageName + ".INSTALL_STATUS"
 
   @ReactMethod
   fun canInstall(promise: Promise) {
@@ -111,6 +110,19 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
     }.start()
   }
 
+  // The APK's own identity (audit BP-5): Backpack refuses to install unless it is the package and
+  // versionCode the signed index lists.
+  @ReactMethod
+  fun apkInfo(path: String, promise: Promise) {
+    Thread {
+      try {
+        val pi = rc.packageManager.getPackageArchiveInfo(path, 0) ?: throw IllegalArgumentException("not an APK Android can read")
+        val vc = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
+        promise.resolve(org.json.JSONObject().put("packageName", pi.packageName).put("versionCode", vc).toString())
+      } catch (t: Throwable) { promise.reject("apk_info", t.message ?: "failed") }
+    }.start()
+  }
+
   @ReactMethod
   fun installedSigners(pkg: String, promise: Promise) {
     try { promise.resolve(org.json.JSONArray(signersOf(rc.packageManager.getPackageInfo(pkg, sigFlags))).toString()) }
@@ -148,14 +160,26 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
   // Write the APK into an install session and commit. Resolves "installed" when Android reports
   // success, "cancelled" if the user backs out; rejects with Android's message on failure.
   @ReactMethod
-  fun install(path: String, promise: Promise) {
+  fun install(path: String, pkg: String, promise: Promise) {
     Thread {
       try {
         val f = File(path)
         val installer = rc.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-        if (Build.VERSION.SDK_INT >= 31) params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+        // Skip Android's confirmation ONLY for an update of an app Backpack itself installed (audit BP-8);
+        // a new app, or one another store installed, always gets the system prompt.
+        if (Build.VERSION.SDK_INT >= 31) {
+          val ours = try {
+            val src = if (Build.VERSION.SDK_INT >= 30) rc.packageManager.getInstallSourceInfo(pkg).installingPackageName
+              else @Suppress("DEPRECATION") rc.packageManager.getInstallerPackageName(pkg)
+            src == rc.packageName
+          } catch (_: Throwable) { false }   // not installed
+          params.setRequireUserAction(if (ours) PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED else PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
+        }
         val id = installer.createSession(params)
+        // a fresh, unguessable action per session (audit BP-15): before API 33 the receiver can't be
+        // registered as not-exported, so only the PendingIntent below may know its name
+        val action = rc.packageName + ".INSTALL_STATUS." + java.util.UUID.randomUUID()
         installer.openSession(id).use { s ->
           f.inputStream().use { inp -> s.openWrite("base.apk", 0, f.length()).use { out -> inp.copyTo(out, 1 shl 16); s.fsync(out) } }
           val receiver = object : BroadcastReceiver() {

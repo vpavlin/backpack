@@ -43,3 +43,31 @@ APK's signing certificate as `apksigner --print-certs` prints it. Before install
 - **Freeze attacks**, if every pointer source is captured. The phone can only show how stale its
   view is.
 - **Transparency** (a public log of every index ever signed).
+
+## Amendment 2026-10-23: independent review
+
+proteus/auditor reviewed 4403ad9 (report: 22 findings; the envelope core, rollback handling and the JNI
+late-callback fix held up). What changed in response:
+
+| Finding | Fix |
+|---|---|
+| BP-1 import-fdroid used index names as local paths | generated temp names; remote names must match a safe pattern; tested with a malicious signed repo |
+| BP-2 root announcer followed symlinks, sent any `*.json` | `send.py`: regular files only (`O_NOFOLLOW`), key-named, ≤ 4 KiB, signature verified with the key in the name; no shell |
+| BP-3 import re-enabled every disabled JAR algorithm (MD5) | import the F-Droid **v2** index: `entry.jar` verifies with the JDK's stock policy; v1 is no longer read |
+| BP-4 a malformed signed index persisted and crashed the app | `mobile/src/schema.ts` validates every field and caps every list before anything is stored; stored repos are re-validated on load; an error boundary offers a way out; an index envelope must carry no `kind` |
+| BP-5 APK identity not bound to the index | the APK's package name and versionCode must equal the index's (phone: `apkInfo`; CLI import and `verify --deep`) |
+| BP-6 a version without a signer skipped the signer checks | a pinned signer is required, by the schema and by `install()` |
+| BP-7 index strings as file paths on the phone | package-name and integer patterns make them path-safe |
+| BP-8 "no user action" requested for every install | only for an update of an app Backpack itself installed |
+| BP-9 external links added repos silently and could re-point a known repo | a confirmation with the full publisher key; nothing unsigned from a link is merged into a known repo |
+| BP-10/11/12/22 unbounded messages, URLs, peers, sizes | caps (8 candidates × 8 KiB per Delivery message, 4 HTTPS pointer URLs to public hosts only, 8 nodes × 4 addresses, 1 MB index, 500 apps, 5 versions, 512 KiB icons); one refresh trigger per repo per 30 s; 30 s connect timeout |
+| BP-15 static install-status broadcast before API 33 | a random action per install session |
+| BP-16 JNI null/overflow paths | allocation and JNI-string checks, size guard, bounded address array, short timeouts for connect/cancel/delete |
+| BP-17 `probe/e2e.sh` eval | no eval |
+| BP-18 `source` opened as any URL | only http(s) |
+| BP-19/20/21 quiet-path alerts, cancelled prompt not remembered, removed repo still watched | fixed |
+
+Accepted, not changed: BP-13 (the phone relies on libstorage's content addressing for the index and
+icons; the index is also signed, and APKs are hashed), and `storageNew` leaking a context on timeout
+(it can't be cancelled; it happens once per process at most).
+

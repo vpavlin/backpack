@@ -10,6 +10,7 @@
 // download_init/download_stream. (No upload — phones fetch; desktops/crib replicate. ADR 0017.)
 #include <jni.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -20,6 +21,8 @@
 extern void libstorageNimMain(void);
 
 #define RESP_TIMEOUT_MS 600000  // 10 min: a slow start/fetch must finish, not be retried (a 2nd start aborts libstorage)
+#define SHORT_TIMEOUT_MS 30000  // connect/cancel/delete: one bad peer must not block the storage thread (audit BP-12/16)
+#define OOM_JSON "{\"ok\":false,\"err\":\"out of memory\"}"
 
 typedef struct {
     pthread_mutex_t mutex;
@@ -73,11 +76,11 @@ static void storage_cb(int ret, const char *msg, size_t len, void *userData) {
 }
 
 // Block until the terminal callback fires or the timeout elapses.
-static void resp_wait(Resp *r) {
+static void resp_wait_ms(Resp *r, long ms) {
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += RESP_TIMEOUT_MS / 1000;
-    deadline.tv_nsec += (RESP_TIMEOUT_MS % 1000) * 1000000L;
+    deadline.tv_sec += ms / 1000;
+    deadline.tv_nsec += (ms % 1000) * 1000000L;
     if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000L; }
     pthread_mutex_lock(&r->mutex);
     while (!r->done) {
@@ -85,6 +88,7 @@ static void resp_wait(Resp *r) {
     }
     pthread_mutex_unlock(&r->mutex);
 }
+static void resp_wait(Resp *r) { resp_wait_ms(r, RESP_TIMEOUT_MS); }
 
 // Build a {"ok":bool,...} JSON jstring from a finished Resp. On ok, puts msg under "msg"; on error,
 // under "err". JSON-escapes the payload defensively (Codex msgs can contain quotes/newlines).
@@ -92,6 +96,7 @@ static jstring resp_to_json(JNIEnv *env, Resp *r) {
     const char *payload = r && r->msg ? r->msg : "";
     int ok = r && r->ret == RET_OK;
     size_t plen = strlen(payload);
+    if (plen > (SIZE_MAX - 32) / 2) return (*env)->NewStringUTF(env, OOM_JSON);   // overflow guard (BP-16)
     // worst case: every char escaped (2x) + fixed envelope
     char *buf = (char *)malloc(plen * 2 + 32);
     if (!buf) return (*env)->NewStringUTF(env, "{\"ok\":false,\"err\":\"oom\"}");
@@ -142,7 +147,9 @@ JNIEXPORT jlong JNICALL
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageNew(JNIEnv *env, jobject thiz, jstring cfgJson) {
     (void)thiz;
     const char *cfg = (*env)->GetStringUTFChars(env, cfgJson, NULL);
+    if (!cfg) return 0L;
     Resp *r = resp_alloc();
+    if (!r) { (*env)->ReleaseStringUTFChars(env, cfgJson, cfg); return 0L; }
     void *ctx = storage_new(cfg, (StorageCallback)storage_cb, r);
     (*env)->ReleaseStringUTFChars(env, cfgJson, cfg);
     if (ctx) resp_wait(r);  // storage_new signals readiness via the callback
@@ -164,18 +171,23 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageVersion(JNIEnv *env, job
     return js;
 }
 
+// Finish a call: wait (if accepted) and turn the Resp into JSON. Allocation failures are checked by
+// every caller first (audit BP-16).
+static jstring call_finish(JNIEnv *env, Resp *r, int accepted, long timeoutMs) {
+    if (accepted == RET_OK) resp_wait_ms(r, timeoutMs);
+    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
+    return resp_finish(env, r);   // frees r, or marks it abandoned for the late callback
+}
+
 // Generic async-call-with-no-arg wrapper (start/stop/close/spr/debug).
 #define DEFINE_CTX_CALL(NAME, FFI)                                                               \
 JNIEXPORT jstring JNICALL                                                                        \
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_##NAME(JNIEnv *env, jobject thiz, jlong ctx) {  \
     (void)thiz;                                                                                  \
     Resp *r = resp_alloc();                                                                      \
+    if (!r) return (*env)->NewStringUTF(env, OOM_JSON);                                          \
     int accepted = FFI((void *)(intptr_t)ctx, (StorageCallback)storage_cb, r);                   \
-    if (accepted == RET_OK) resp_wait(r);                                                        \
-    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }               \
-    jstring js = resp_finish(env, r);                                                           \
-    /* freed or abandoned by resp_finish */                                                                                \
-    return js;                                                                                   \
+    return call_finish(env, r, accepted, RESP_TIMEOUT_MS);                                       \
 }
 DEFINE_CTX_CALL(storageStart, storage_start)
 DEFINE_CTX_CALL(storageStop,  storage_stop)
@@ -191,39 +203,37 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDestroy(JNIEnv *env, job
                                                    : "{\"ok\":false,\"err\":\"destroy failed\"}");
 }
 
-// Generic async-call-with-one-cid wrapper (exists/fetch/download_init).
-#define DEFINE_CID_CALL(NAME, FFI)                                                               \
+// Generic async-call-with-one-cid wrapper (exists/cancel/delete), with its own timeout.
+#define DEFINE_CID_CALL(NAME, FFI, TIMEOUT)                                                      \
 JNIEXPORT jstring JNICALL                                                                        \
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_##NAME(JNIEnv *env, jobject thiz, jlong ctx,    \
                                                         jstring cidStr) {                        \
     (void)thiz;                                                                                  \
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);                              \
+    if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);                                        \
     Resp *r = resp_alloc();                                                                      \
+    if (!r) { (*env)->ReleaseStringUTFChars(env, cidStr, cid); return (*env)->NewStringUTF(env, OOM_JSON); } \
     int accepted = FFI((void *)(intptr_t)ctx, cid, (StorageCallback)storage_cb, r);              \
     (*env)->ReleaseStringUTFChars(env, cidStr, cid);                                             \
-    if (accepted == RET_OK) resp_wait(r);                                                        \
-    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }               \
-    jstring js = resp_finish(env, r);                                                           \
-    /* freed or abandoned by resp_finish */                                                                                \
-    return js;                                                                                   \
+    return call_finish(env, r, accepted, TIMEOUT);                                               \
 }
-DEFINE_CID_CALL(storageExists, storage_exists)
+DEFINE_CID_CALL(storageExists, storage_exists, SHORT_TIMEOUT_MS)
 // Cancel a running download of `cid` (its download_stream then returns with an error), and drop a
 // CID's blocks from the local store (a cancelled download's partial blocks).
-DEFINE_CID_CALL(storageDownloadCancel, storage_download_cancel)
-DEFINE_CID_CALL(storageDelete, storage_delete)
+DEFINE_CID_CALL(storageDownloadCancel, storage_download_cancel, SHORT_TIMEOUT_MS)
+DEFINE_CID_CALL(storageDelete, storage_delete, SHORT_TIMEOUT_MS)
 // fetch (libstorage >= PR #1540): isPrivate=false, advertise=false — a fetch-only client neither
 // hides from nor advertises to the DHT.
 JNIEXPORT jstring JNICALL
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageFetch(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
     (void)thiz;
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
+    if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);
     Resp *r = resp_alloc();
+    if (!r) { (*env)->ReleaseStringUTFChars(env, cidStr, cid); return (*env)->NewStringUTF(env, OOM_JSON); }
     int accepted = storage_fetch((void *)(intptr_t)ctx, cid, false, false, (StorageCallback)storage_cb, r);
     (*env)->ReleaseStringUTFChars(env, cidStr, cid);
-    if (accepted == RET_OK) resp_wait(r);
-    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
-    return resp_finish(env, r);
+    return call_finish(env, r, accepted, RESP_TIMEOUT_MS);
 }
 
 JNIEXPORT jstring JNICALL
@@ -231,64 +241,70 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadInit(JNIEnv *env
         jlong ctx, jstring cidStr, jlong chunkSize, jboolean local) {
     (void)thiz;
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
+    if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);
     Resp *r = resp_alloc();
+    if (!r) { (*env)->ReleaseStringUTFChars(env, cidStr, cid); return (*env)->NewStringUTF(env, OOM_JSON); }
     int accepted = storage_download_init((void *)(intptr_t)ctx, cid, (size_t)chunkSize,
                                          local ? true : false, false /* isPrivate */, false /* advertise */,
                                          (StorageCallback)storage_cb, r);
     (*env)->ReleaseStringUTFChars(env, cidStr, cid);
-    if (accepted == RET_OK) resp_wait(r);
-    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
-    jstring js = resp_finish(env, r);
-    /* freed or abandoned by resp_finish */
-    return js;
+    return call_finish(env, r, accepted, RESP_TIMEOUT_MS);
 }
 
 // Download a CID straight to a file on disk — the BlobBackend.get path (JS then reads the file).
 JNIEXPORT jstring JNICALL
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadStream(JNIEnv *env, jobject thiz,
         jlong ctx, jstring cidStr, jlong chunkSize, jboolean local, jstring filePathStr) {
-    (void)thiz;
+    (void)thiz; (void)local;   // >= PR #1540: the session made by download_init carries local/private
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
+    if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);
     const char *path = (*env)->GetStringUTFChars(env, filePathStr, NULL);
+    if (!path) { (*env)->ReleaseStringUTFChars(env, cidStr, cid); return (*env)->NewStringUTF(env, OOM_JSON); }
     Resp *r = resp_alloc();
-    (void)local;   // >= PR #1540: the session made by download_init carries local/private
+    if (!r) {
+        (*env)->ReleaseStringUTFChars(env, cidStr, cid); (*env)->ReleaseStringUTFChars(env, filePathStr, path);
+        return (*env)->NewStringUTF(env, OOM_JSON);
+    }
     int accepted = storage_download_stream((void *)(intptr_t)ctx, cid, (size_t)chunkSize,
                                            path, (StorageCallback)storage_cb, r);
     (*env)->ReleaseStringUTFChars(env, cidStr, cid);
     (*env)->ReleaseStringUTFChars(env, filePathStr, path);
-    if (accepted == RET_OK) resp_wait(r);
-    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
-    jstring js = resp_finish(env, r);
-    /* freed or abandoned by resp_finish */
-    return js;
+    return call_finish(env, r, accepted, RESP_TIMEOUT_MS);
 }
 
-// Connect to a peer (bootstrap / a desktop Codex node) by peerId + multiaddrs.
+// Connect to a peer (bootstrap / a desktop Codex node) by peerId + multiaddrs. At most 8 addresses;
+// a 30 s wait (audit BP-12/16).
+#define MAX_ADDRS 8
 JNIEXPORT jstring JNICALL
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageConnect(JNIEnv *env, jobject thiz,
         jlong ctx, jstring peerIdStr, jobjectArray addrs) {
     (void)thiz;
     const char *peerId = (*env)->GetStringUTFChars(env, peerIdStr, NULL);
+    if (!peerId) return (*env)->NewStringUTF(env, OOM_JSON);
     jsize n = addrs ? (*env)->GetArrayLength(env, addrs) : 0;
-    const char **caddrs = n > 0 ? (const char **)calloc((size_t)n, sizeof(char *)) : NULL;
-    jstring *jstrs = n > 0 ? (jstring *)calloc((size_t)n, sizeof(jstring)) : NULL;
+    if (n > MAX_ADDRS) n = MAX_ADDRS;
+    const char *caddrs[MAX_ADDRS] = { 0 };
+    jstring jstrs[MAX_ADDRS] = { 0 };
+    jsize got = 0;
     for (jsize i = 0; i < n; i++) {
-        jstrs[i] = (jstring)(*env)->GetObjectArrayElement(env, addrs, i);
-        caddrs[i] = (*env)->GetStringUTFChars(env, jstrs[i], NULL);
+        jstring js = (jstring)(*env)->GetObjectArrayElement(env, addrs, i);
+        if (!js) continue;
+        const char *c = (*env)->GetStringUTFChars(env, js, NULL);
+        if (!c) { (*env)->DeleteLocalRef(env, js); continue; }
+        jstrs[got] = js; caddrs[got] = c; got++;
     }
+    jstring result;
     Resp *r = resp_alloc();
-    int accepted = storage_connect((void *)(intptr_t)ctx, peerId, caddrs, (size_t)n,
-                                   (StorageCallback)storage_cb, r);
-    if (accepted == RET_OK) resp_wait(r);
-    else { r->ret = RET_ERR; r->done = 1; if (!r->msg) r->msg = strdup("call not accepted"); }
-    for (jsize i = 0; i < n; i++) {
+    if (!r) result = (*env)->NewStringUTF(env, OOM_JSON);
+    else {
+        int accepted = storage_connect((void *)(intptr_t)ctx, peerId, caddrs, (size_t)got,
+                                       (StorageCallback)storage_cb, r);
+        result = call_finish(env, r, accepted, SHORT_TIMEOUT_MS);
+    }
+    for (jsize i = 0; i < got; i++) {
         (*env)->ReleaseStringUTFChars(env, jstrs[i], caddrs[i]);
         (*env)->DeleteLocalRef(env, jstrs[i]);
     }
-    if (caddrs) free(caddrs);
-    if (jstrs) free(jstrs);
     (*env)->ReleaseStringUTFChars(env, peerIdStr, peerId);
-    jstring js = resp_finish(env, r);
-    /* freed or abandoned by resp_finish */
-    return js;
+    return result;
 }

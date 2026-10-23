@@ -8,8 +8,15 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as T from "./lib/loam-transport";
 import { openEnvelope } from "./envelope";
 import * as storage from "./storage";
+import { validatePointer } from "./schema";
+import type { Pointer } from "./schema";
+export type { Pointer };
 
-export interface Pointer { key: string; seq: number; index: string; created: string; nodes?: storage.Peer[] }
+// The topics are public: anyone can publish to them. Bound the work per message before parsing
+// anything (audit BP-10): a pointer envelope is ~700 bytes.
+const MAX_CANDIDATES = 8, MAX_BYTES = 8192;
+const MIN_TRIGGER_MS = 30_000;                     // at most one refresh trigger per repo per 30 s
+const lastTrigger = new Map<string, number>();
 
 const APP_ID = "xyz.vpavlin.backpack";
 export const topicFor = (key: string) => `/backpack/1/${key}/json`;
@@ -30,18 +37,30 @@ export function status(): { state: typeof state; error: string } { return { stat
 
 function receive(topic: string, candidates: Uint8Array[]): boolean {
   const key = [...keys].find((k) => topicFor(k) === topic);
-  if (!key) return false;
-  for (const c of candidates) {
+  if (!key || !Array.isArray(candidates)) return false;
+  for (const c of candidates.slice(0, MAX_CANDIDATES)) {
+    if (!c || c.length > MAX_BYTES) continue;
     try {
-      const p = openEnvelope<Pointer>(JSON.parse(new TextDecoder().decode(c)), key, "pointer");
+      const p = validatePointer(openEnvelope(JSON.parse(new TextDecoder().decode(c)), key, "pointer"), key);
       storage.diag(`delivery: pointer ${key.slice(0, 6)} seq ${p.seq}`);
       heard.set(key, Date.now());
       const prev = best.get(key);
-      if (!prev || p.seq > prev.seq) { best.set(key, p); via.set(key, Date.parse(p.created) < listeningSince ? "store" : "live"); onPointer?.(p); }
+      if (!prev || p.seq > prev.seq) {
+        best.set(key, p); via.set(key, Date.parse(p.created) < listeningSince ? "store" : "live");
+        const now = Date.now();
+        if (now - (lastTrigger.get(key) ?? 0) >= MIN_TRIGGER_MS) { lastTrigger.set(key, now); onPointer?.(p); }
+        // a newer pointer inside the window is kept (best) and picked up by the next refresh
+      }
       return true;
     } catch { /* not ours, not valid, or another candidate decoding: try the next */ }
   }
   return false;
+}
+
+/** Stop caring about removed repos (audit BP-21). The transport has no unsubscribe yet, so the topic
+ *  stays joined until restart, but its messages are ignored and nothing is remembered for it. */
+export function unwatch(repoKeys: string[]): void {
+  for (const k of repoKeys) { keys.delete(k); best.delete(k); via.delete(k); heard.delete(k); lastTrigger.delete(k); }
 }
 
 async function deviceId(): Promise<string> {

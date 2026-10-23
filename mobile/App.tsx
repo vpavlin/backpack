@@ -1,5 +1,5 @@
 // Backpack — install Android apps from repositories that live in Logos Storage.
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, AppState, Image, Linking as RNLinking, Modal, Pressable, Switch, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -14,7 +14,27 @@ const C = { bg: "#14161a", card: "#1d2026", line: "#2a2e36", text: "#e8e6e3", di
 const mb = (n: number) => `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
 
 export default function App() {
-  return (<SafeAreaProvider><StatusBar style="light" /><Main /></SafeAreaProvider>);
+  return (<SafeAreaProvider><StatusBar style="light" /><Guard><Main /></Guard></SafeAreaProvider>);
+}
+
+// Last line of defence (audit BP-4): whatever a repo's data does to rendering, the user gets a way out
+// instead of a crash on every launch. (Stored indexes are also re-validated on load.)
+class Guard extends React.Component<{ children: React.ReactNode }, { err: string | null }> {
+  state = { err: null as string | null };
+  static getDerivedStateFromError(e: any) { return { err: String(e?.message ?? e) }; }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <SafeAreaView style={[s.root, { padding: 20 }]}>
+        <Text style={s.title}>Something in a repository broke the screen</Text>
+        <Text style={[s.hint, { marginVertical: 12 }]}>{this.state.err}</Text>
+        <Pressable style={s.btn} onPress={async () => { await R.saveRepos([]); this.setState({ err: null }); }}>
+          <Text style={s.btnT}>Remove all repositories and start over</Text>
+        </Pressable>
+        <Pressable style={[s.btnGhost, { marginTop: 10 }]} onPress={() => this.setState({ err: null })}><Text style={s.btnGhostT}>Try again</Text></Pressable>
+      </SafeAreaView>
+    );
+  }
 }
 
 function Main() {
@@ -35,7 +55,9 @@ function Main() {
   const lastRefresh = useRef(0);
   // Live pointers over Logos Delivery (ADR 0007): a newer seq than we hold → refresh (and auto-update).
   const listen = (rs: R.Repo[]) => delivery.watch(rs.map((r) => r.key), async (p) => {
-    const have = (await R.loadRepos()).find((r) => r.key === p.key)?.seq ?? 0;
+    const known = (await R.loadRepos()).find((r) => r.key === p.key);
+    if (!known) return;                     // a removed repo (audit BP-21)
+    const have = known.seq ?? 0;
     // show it in the repo's sources line right away, newer or not
     const name = `Delivery (${delivery.arrivedVia(p.key) ?? "live"})`;
     setRepos((cur) => cur.map((r) => r.key !== p.key ? r : { ...r, sources: [{ name, seq: p.seq }, ...(r.sources ?? []).filter((x) => !x.name.startsWith("Delivery"))] }));
@@ -67,6 +89,19 @@ function Main() {
       R.iconPath(r, a).then((p) => p && setIcons((m) => ({ ...m, [a.id]: `file://${p}` }))).catch(() => {});
     }
   }, []);
+
+  // A link opened from outside (another app, a browser, a QR scanner) is a REQUEST: show what it is and
+  // add only if the user says so (audit BP-9). A link pasted into "+ Repo" is the user's own action.
+  const confirmAdd = (l: string) => {
+    let r: R.Repo;
+    try { r = R.parseLink(l); } catch (e: any) { Alert.alert("Not a valid repository link", String(e?.message ?? e)); return; }
+    R.loadRepos().then((rs) => {
+      const known = rs.find((x) => x.key === r.key);
+      Alert.alert(known ? `Update "${known.name}"?` : `Add "${r.name}"?`,
+        `${known ? "You already have this repository; Backpack will check it for a newer list." : "Only add repositories from people you trust: Backpack will offer the apps it lists."}\n\nPublisher key\n${r.key}`,
+        [{ text: "Cancel", style: "cancel" }, { text: known ? "Check" : "Add", onPress: () => add(l) }]);
+    });
+  };
 
   const add = useCallback(async (l: string) => {
     setBusy("Adding repository…");
@@ -104,10 +139,10 @@ function Main() {
       setPrefs(st);
       setRepos(rs); scanInstalled(rs); loadIcons(rs);
       if (rs.length) listen(rs);   // start Delivery first: its Store pull runs while the web sources answer
-      if (u && u.startsWith("backpack://repo")) add(u);
+      if (u && u.startsWith("backpack://repo")) confirmAdd(u);
       else if (rs.length) refreshAll();
     });
-    const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("backpack://repo")) add(url); });
+    const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("backpack://repo")) confirmAdd(url); });
     // back in the foreground: rescan (an install or uninstall may have finished), and look for
     // updates again if the last check is more than 15 minutes old
     const st = AppState.addEventListener("change", (s) => {
@@ -128,7 +163,11 @@ function Main() {
       if (res === "cancelled" && !quiet) Alert.alert("Not installed", "The install was cancelled.");
       if (res === "needs-permission") Alert.alert("Allow installs", `${app.label} is downloaded and checked. Android needs your permission for Backpack to install apps: turn on "Allow from this source", then come back and tap Install again (it won't download again).`,
         [{ text: "Later", style: "cancel" }, { text: "Open settings", onPress: () => R.installer.openSettings() }]);
-    } catch (e: any) { Alert.alert(`Couldn't install ${app.label}`, String(e?.message ?? e)); }
+    } catch (e: any) {
+      // automatic updates never pop alerts (audit BP-19): log it; the user sees it when they tap Update
+      if (quiet) storage.diag(`auto-update ${app.id}: ${e?.message ?? e}`);
+      else Alert.alert(`Couldn't install ${app.label}`, String(e?.message ?? e));
+    }
     finally { set(null); setProg((m) => { const n = { ...m }; delete n[app.id]; return n; }); scanInstalled(await R.loadRepos()); }
     return res;
   };
@@ -149,14 +188,15 @@ function Main() {
         setUpdating(`Updating ${u.app.label} to ${u.v.versionName}${ups.length > 1 ? ` (${i + 1} of ${ups.length})` : ""}…`);
         const res = await install(u.repo, u.app, true);
         if (res === "needs-permission") break;   // install() already explained; the rest would ask again
-        if (res === "download-cancelled") await R.skipVersion(u.app.id, u.v.versionCode);   // don't start it again by itself
+        // cancelled (download, or Android's install prompt): don't start it again by itself (audit BP-20)
+        if (res === "download-cancelled" || res === "cancelled") await R.skipVersion(u.app.id, u.v.versionCode);
       }
     } finally { updatingRef.current = false; setUpdating(null); }
   };
 
   const remove = (r: R.Repo) => Alert.alert(`Remove "${r.name}"?`, "Apps you installed from it stay installed.", [
     { text: "Cancel", style: "cancel" },
-    { text: "Remove", style: "destructive", onPress: async () => { const rs = repos.filter((x) => x.key !== r.key); await R.saveRepos(rs); setRepos(rs); } },
+    { text: "Remove", style: "destructive", onPress: async () => { const rs = repos.filter((x) => x.key !== r.key); await R.saveRepos(rs); setRepos(rs); delivery.unwatch([r.key]); } },
   ]);
 
   return (

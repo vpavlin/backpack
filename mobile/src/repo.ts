@@ -11,13 +11,12 @@ import { NativeModules } from "react-native";
 import * as storage from "./storage";
 import * as delivery from "./delivery";
 import * as settings from "./settings";
+import { LIMITS, isCid, isKey, peer as checkPeer, safePointerUrl, validateIndex, validatePointer } from "./schema";
+import type { App, Index, Peer, Pointer, Version } from "./schema";
+export type { App, Index, Pointer, Version };
 
 const Installer: any = (NativeModules as any).BackpackInstaller;
 
-export interface Version { versionCode: number; versionName: string; size: number; sha256: string; signer?: string; cid: string; minSdk: number; abis: string[]; added?: string; blockSize?: number }
-export interface App { id: string; label: string; summary?: string; description?: string; license?: string; source?: string; icon: string | null; versions: Version[] }
-export interface Index { v: number; name: string; key: string; seq?: number; created: string; nodes: storage.Peer[]; pointers?: string[]; apps: App[] }
-export interface Pointer { key: string; seq: number; index: string; created: string; nodes?: storage.Peer[] }
 export interface Repo {
   key: string; name: string; indexCid: string; peers: storage.Peer[];
   seq?: number;            // highest seq accepted: never go below it (rollback protection)
@@ -32,17 +31,40 @@ const KEY = "backpack.repos.v1";
 
 const uniq = <T,>(xs: T[]) => [...new Set(xs)];
 
+/** A link is UNTRUSTED input (any app can open one): every field is checked and capped (audit BP-9/11/12). */
 export function parseLink(link: string): Repo {
   const t = link.trim();
-  if (!/^backpack:\/\/repo\?/i.test(t)) throw new Error("not a backpack:// repo link");
+  if (t.length > 8000 || !/^backpack:\/\/repo\?/i.test(t)) throw new Error("not a backpack:// repo link");
   const p = new URLSearchParams(t.slice(t.indexOf("?") + 1));
   const i = p.get("i"), k = p.get("k"), peerId = p.get("p");
   if (!i || !k || !peerId) throw new Error("the link is missing the index, key or node");
-  return { key: k, name: p.get("n") ?? "Backpack", indexCid: i, peers: [{ peerId, addrs: p.getAll("a"), spr: p.get("s") ?? undefined }], pointers: p.getAll("u"), seq: 0 };
+  if (!isKey(k)) throw new Error("the link's repository key is malformed");
+  if (!isCid(i)) throw new Error("the link's index CID is malformed");
+  let node: Peer;
+  try { node = checkPeer({ peerId, addrs: p.getAll("a").slice(0, LIMITS.addrs), spr: p.get("s") ?? undefined }); }
+  catch (e: any) { throw new Error(`the link's node is malformed (${e?.message ?? e})`); }
+  const name = (p.get("n") ?? "Backpack").slice(0, 100);
+  const pointers = p.getAll("u").slice(0, LIMITS.pointers).map(safePointerUrl).filter((u): u is string => !!u);
+  return { key: k, name, indexCid: i, peers: [node], pointers, seq: 0 };
 }
 
+/** Stored repos are re-checked on load: an index that no longer validates is dropped (the repo stays,
+ *  with an error, so it can be removed) instead of crashing every launch (audit BP-4). */
 export async function loadRepos(): Promise<Repo[]> {
-  try { return JSON.parse((await AsyncStorage.getItem(KEY)) ?? "[]"); } catch { return []; }
+  let raw: any[];
+  try { raw = JSON.parse((await AsyncStorage.getItem(KEY)) ?? "[]"); } catch { return []; }
+  if (!Array.isArray(raw)) return [];
+  const out: Repo[] = [];
+  for (const r of raw) {
+    if (!r || !isKey(r.key)) continue;
+    const repo: Repo = { ...r, name: typeof r.name === "string" ? r.name.slice(0, 100) : "Backpack", peers: Array.isArray(r.peers) ? r.peers.slice(0, LIMITS.nodes) : [] };
+    if (repo.index) {
+      try { repo.index = validateIndex(repo.index, repo.key); }
+      catch (e: any) { repo.index = undefined; repo.loadedCid = undefined; repo.error = String(e?.message ?? e); }
+    }
+    out.push(repo);
+  }
+  return out;
 }
 export async function saveRepos(r: Repo[]) { await AsyncStorage.setItem(KEY, JSON.stringify(r)); }
 
@@ -57,7 +79,7 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
   const d = delivery.pointerFor(repo.key), ds = delivery.status();
   if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
   else sources.push({ name: "Delivery", error: ds.state === "on" ? "nothing yet" : ds.state === "unavailable" ? "Loam not available" : "starting" });
-  const urls = uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])]);
+  const urls = uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])].map(safePointerUrl).filter((u): u is string => !!u)).slice(0, LIMITS.pointers);
   if (!settings.get().webPointers) { if (urls.length) sources.push({ name: "web", error: "off in Settings" }); }
   else await Promise.all(urls.map(async (url) => {
     const name = (() => { try { return new URL(url).host; } catch { return url; } })();
@@ -65,7 +87,9 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
       const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 15000);
       const r = await fetch(url, { signal: ctl.signal, headers: { "Cache-Control": "no-cache" } }); clearTimeout(tm);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const p = openEnvelope<Pointer>(await r.json(), repo.key, "pointer");
+      const text = await r.text();
+      if (text.length > 8192) throw new Error("too large for a pointer");
+      const p = validatePointer(openEnvelope(JSON.parse(text), repo.key, "pointer"), repo.key);
       storage.diag(`pointer ${name}: seq ${p.seq}`);
       sources.push({ name, seq: p.seq }); cands.push({ p, name });
     } catch (e: any) {
@@ -92,30 +116,34 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
   else if (repo.index && cid === repo.loadedCid) {
     return { ...repo, sources, checkedAt: new Date().toISOString(), error: undefined };   // nothing newer: no Storage traffic
   }
-  const peers = uniq([...(ptr?.nodes ?? []), ...repo.peers].map((p) => JSON.stringify(p))).map((s) => JSON.parse(s));
+  const peers = uniq([...(ptr?.nodes ?? []), ...repo.peers].map((p) => JSON.stringify(p))).map((s) => JSON.parse(s)).slice(0, LIMITS.nodes);
+  if (!isCid(cid)) throw new Error("the index CID is malformed");
   const dir = await storage.filesDir();
   const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress);
-  const index = openEnvelope<Index>(JSON.parse(raw), repo.key, "index");
-  const seq = index.seq ?? 0;
+  if (!raw) throw new Error("the index is empty or larger than 1 MB: refusing");
+  const index = validateIndex(openEnvelope(JSON.parse(raw), repo.key, "index"), repo.key);
+  const seq = index.seq;
   if (seq < have) throw new Error(`this index is older than the one you have (seq ${seq} < ${have}): refusing`);
   if (expectSeq !== null && seq !== expectSeq) throw new Error(`index seq ${seq} doesn't match its pointer (${expectSeq})`);
   const now = new Date().toISOString();
   return {
     ...repo, name: index.name || repo.name, index, indexCid: cid, seq,
-    peers: index.nodes?.length ? index.nodes : repo.peers,
-    pointers: uniq([...(repo.pointers ?? []), ...(index.pointers ?? [])]),
+    peers: index.nodes.length ? index.nodes : repo.peers,
+    pointers: uniq([...(repo.pointers ?? []), ...index.pointers]).slice(0, LIMITS.pointers),
     loadedCid: cid, fetchedAt: now, checkedAt: now, error: undefined, sources,
     via: expectSeq !== null ? via : repo.via ?? "link",
   };
 }
 
-/** Add a repo from a link, or bring a known repo (same key) forward. A link to an older index is not an error. */
+/**
+ * Add a repo from a link, or bring a known repo (same key) forward. A link to an older index is not an
+ * error. For a repo we already have, nothing unsigned from the link is merged in (its nodes and web
+ * addresses come only from the signed index): a link can't redirect a trusted repo (audit BP-9).
+ */
 export async function addFromLink(link: string, repos: Repo[], onStage?: (s: string) => void): Promise<Repo[]> {
   const r = parseLink(link);
   const known = repos.find((x) => x.key === r.key);
-  const merged: Repo = known
-    ? { ...known, indexCid: r.indexCid, peers: [...r.peers, ...known.peers], pointers: uniq([...(r.pointers ?? []), ...(known.pointers ?? [])]) }
-    : r;
+  const merged: Repo = known ? { ...known, indexCid: known.index ? known.indexCid : r.indexCid } : r;
   let next: Repo;
   try { next = await refresh(merged, onStage); }
   catch (e: any) {
@@ -128,10 +156,11 @@ export async function addFromLink(link: string, repos: Repo[], onStage?: (s: str
 }
 
 export async function iconPath(repo: Repo, app: App): Promise<string | null> {
-  if (!app.icon) return null;
+  if (!app.icon || !isCid(app.icon)) return null;
   const path = `${await storage.filesDir()}/icons/${app.icon}.img`;
   if ((await storage.fileSize(path)) > 0) return path;
   await storage.getFile(app.icon, path, repo.peers);
+  if ((await storage.fileSize(path)) > LIMITS.iconBytes) { await Installer.deleteFile(path); return null; }   // audit BP-22
   return path;
 }
 
@@ -144,6 +173,7 @@ export const installer = {
   uninstall: (pkg: string): Promise<boolean> => Installer.uninstall(pkg),
   installerOf: (pkg: string): Promise<string> => Installer.installerOf(pkg),
   installedSigners: async (pkg: string): Promise<string[]> => JSON.parse(await Installer.installedSigners(pkg)),
+  apkInfo: async (path: string): Promise<{ packageName: string; versionCode: number }> => JSON.parse(await Installer.apkInfo(path)),
 };
 
 export interface Update { repo: Repo; app: App; v: Version; from: number }
@@ -192,7 +222,9 @@ export function publishersOf(repos: Repo[], pkg: string): { repo: Repo; signer?:
  * signer too (Android would refuse the update anyway, but only after the user said yes).
  */
 export async function install(repo: Repo, app: App, v: Version, onStage: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<string> {
+  // app.id and versionCode passed the schema (package-name pattern, integer), so this stays in apks/ (BP-7)
   const path = `${await storage.filesDir()}/apks/${app.id}_${v.versionCode}.apk`;
+  if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("this version doesn't pin a signing key: refusing to install it");   // BP-6
   const have = await storage.fileSize(path);
   if (have !== v.size) {
     try { await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress); }
@@ -201,17 +233,22 @@ export async function install(repo: Repo, app: App, v: Version, onStage: (s: str
   onStage("checking");
   const sha = await Installer.sha256(path);
   if (sha !== v.sha256) { await Installer.deleteFile(path); throw new Error("the downloaded APK doesn't match the repo's checksum"); }
-  if (v.signer) {
-    const signers: string[] = JSON.parse(await Installer.apkSigners(path));
-    if (!signers.includes(v.signer)) { await Installer.deleteFile(path); throw new Error(`the APK is signed by ${signers[0]?.slice(0, 8) ?? "nobody"}…, not by the key the repo pins (${v.signer.slice(0, 8)}…)`); }
-    const installed: string[] = JSON.parse(await Installer.installedSigners(app.id));
-    if (installed.length && !installed.includes(v.signer)) throw new Error(`the installed ${app.label} is signed by a different key (${installed[0].slice(0, 8)}…). Android won't update it; uninstall it first if you trust this repo.`);
+  const signers: string[] = JSON.parse(await Installer.apkSigners(path));
+  if (!signers.includes(v.signer)) { await Installer.deleteFile(path); throw new Error(`the APK is signed by ${signers[0]?.slice(0, 8) ?? "nobody"}…, not by the key the repo pins (${v.signer.slice(0, 8)}…)`); }
+  // the APK must BE the app and version the index says (BP-5): otherwise a repo could list "Bank" and
+  // install another package, or loop updates with a mislabelled versionCode
+  const info = await installer.apkInfo(path);
+  if (info.packageName !== app.id || info.versionCode !== v.versionCode) {
+    await Installer.deleteFile(path);
+    throw new Error(`the APK is ${info.packageName} (versionCode ${info.versionCode}), but the repo says ${app.id} (${v.versionCode}): refusing`);
   }
+  const installed: string[] = JSON.parse(await Installer.installedSigners(app.id));
+  if (installed.length && !installed.includes(v.signer)) throw new Error(`the installed ${app.label} is signed by a different key (${installed[0].slice(0, 8)}…). Android won't update it; uninstall it first if you trust this repo.`);
   // Ask for the install permission only now: the download doesn't need it, and the checked file stays
   // cached (same size → no re-download), so the next tap goes straight to installing.
   if (!(await Installer.canInstall())) return "needs-permission";
   onStage("installing");
-  const res: string = await Installer.install(path);
+  const res: string = await Installer.install(path, app.id);
   if (res === "installed") await Installer.deleteFile(path);
   return res;
 }
