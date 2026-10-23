@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backpack · app repos on Logos Storage</title>
+<meta name="description" content="Backpack: an F-Droid-like Android app repository that lives in Logos Storage, announces updates over Logos Delivery, and checks every byte against its publisher's keys.">
+<link rel="icon" href="mark.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#f7f3ec; --bg2:#efe8dc; --card:#fffdf8; --line:#e2d8c6; --text:#1d1b18; --dim:#6b645a;
+  --accent:#b8752c; --accent2:#e0a458; --ok:#3d7a3d; --err:#a8432f; --code:#f1eadd;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#14161a; --bg2:#1a1d22; --card:#1d2026; --line:#2a2e36; --text:#e8e6e3; --dim:#9aa0a8;
+  --accent:#e0a458; --accent2:#c98a3e; --ok:#7fbf7f; --err:#e07a6a; --code:#23262d; } }
+:root[data-theme="dark"]{
+  --bg:#14161a; --bg2:#1a1d22; --card:#1d2026; --line:#2a2e36; --text:#e8e6e3; --dim:#9aa0a8;
+  --accent:#e0a458; --accent2:#c98a3e; --ok:#7fbf7f; --err:#e07a6a; --code:#23262d; }
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:17px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent)}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px}
+header.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+header.top .wrap{display:flex;align-items:center;gap:10px;height:56px}
+header.top img{width:30px;height:30px}
+header.top b{font-size:18px}
+header.top nav{margin-left:auto;display:flex;gap:16px;font-size:15px}
+header.top nav a{color:var(--dim);text-decoration:none}
+header.top nav a:hover{color:var(--accent)}
+@media (max-width:700px){header.top nav{display:none}}
+.hero{padding:64px 0 40px;display:grid;grid-template-columns:1.3fr 1fr;gap:32px;align-items:center}
+@media (max-width:760px){.hero{grid-template-columns:1fr;padding-top:36px}}
+.hero h1{font-size:clamp(34px,6vw,54px);line-height:1.08;margin:0 0 16px;letter-spacing:-.02em}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero p.lead{font-size:20px;color:var(--dim);margin:0 0 22px}
+.hero .mark{width:100%;max-width:300px;justify-self:center;filter:drop-shadow(0 14px 30px rgba(0,0,0,.18))}
+.btns{display:flex;flex-wrap:wrap;gap:10px}
+.btn{display:inline-block;padding:11px 18px;border-radius:12px;font-weight:650;text-decoration:none;border:1px solid var(--accent)}
+.btn.primary{background:var(--accent2);color:#14161a;border-color:var(--accent2)}
+.btn.ghost{color:var(--accent)}
+section{padding:44px 0;border-top:1px solid var(--line)}
+section h2{font-size:28px;margin:0 0 6px;letter-spacing:-.01em}
+section .kicker{color:var(--accent);font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:6px}
+section p.intro{color:var(--dim);max-width:720px;margin-top:4px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:22px}
+@media (max-width:760px){.grid3,.grid2{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
+.card h3{margin:0 0 6px;font-size:18px}
+.card .size{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--dim)}
+.card p{margin:8px 0 0;font-size:15.5px}
+.tag{display:inline-block;font-size:12.5px;font-weight:650;padding:2px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim);margin:8px 6px 0 0}
+.tag.storage{color:var(--accent);border-color:var(--accent)}
+.tag.delivery{color:var(--ok);border-color:var(--ok)}
+.tag.web{color:var(--dim)}
+.diagram{margin-top:26px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:12px;overflow-x:auto}
+.diagram svg{display:block;width:100%;min-width:640px;height:auto}
+.diagram text{font-family:system-ui,sans-serif;fill:var(--text)}
+.diagram .dim{fill:var(--dim)}
+.diagram .box{fill:var(--bg2);stroke:var(--line);stroke-width:1.5}
+.diagram .net{fill:none;stroke-width:2.5}
+.checks{list-style:none;padding:0;margin:18px 0 0;display:grid;gap:10px}
+.checks li{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px 12px 44px;position:relative;font-size:15.5px}
+.checks li::before{content:"✓";position:absolute;left:14px;top:10px;color:var(--ok);font-weight:800;font-size:18px}
+.checks li b{display:block;font-size:16px}
+table{width:100%;border-collapse:collapse;margin-top:18px;font-size:15px;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;background:var(--bg2)}
+tr:last-child td{border-bottom:0}
+td.num{font-family:ui-monospace,Menlo,monospace;white-space:nowrap}
+.tablewrap{overflow-x:auto}
+pre{background:var(--code);border:1px solid var(--line);border-radius:12px;padding:14px;overflow-x:auto;font-size:14px;line-height:1.5}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.92em}
+p code,li code,td code{background:var(--code);padding:1px 5px;border-radius:5px}
+.note{border-left:3px solid var(--accent);padding:6px 0 6px 14px;color:var(--dim);margin:16px 0 0}
+.adrs{columns:2;column-gap:24px;margin:16px 0 0;padding-left:18px}
+@media (max-width:700px){.adrs{columns:1}}
+.adrs li{margin-bottom:6px;break-inside:avoid}
+footer{padding:30px 0 50px;color:var(--dim);font-size:14px;border-top:1px solid var(--line)}
+.theme{background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px;padding:3px 9px;cursor:pointer;font-size:14px}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <img src="mark.svg" alt=""><b>Backpack</b>
+  <nav><a href="#how">How it works</a><a href="#trust">Trust</a><a href="#updates">Updates</a><a href="#speed">Speed</a><a href="#publish">Publish</a><a href="#status">Status</a></nav>
+  <button class="theme" id="theme" aria-label="Switch colour theme">◐</button>
+</div></header>
+
+<main class="wrap">
+  <div class="hero">
+    <div>
+      <h1>Android app repos you carry, <em>not host.</em></h1>
+      <p class="lead">Backpack is an F-Droid-like app store for Android. A repository lives in <b>Logos Storage</b>, announces its updates over <b>Logos Delivery</b>, and is nothing more than a key. There's no server to run, and you don't have to trust anyone who passes it along.</p>
+      <div class="btns">
+        <a class="btn primary" href="https://github.com/vpavlin/backpack">Source on GitHub</a>
+        <a class="btn ghost" href="#how">How it works</a>
+        <a class="btn ghost" href="https://github.com/vpavlin/backpack/tree/main/docs/adr">Design decisions</a>
+      </div>
+    </div>
+    <img class="mark" src="mark.svg" alt="Backpack logo: an amber backpack whose pocket holds three linked nodes">
+  </div>
+
+  <section id="why">
+    <div class="kicker">Why</div>
+    <h2>A repo shouldn't depend on one web server</h2>
+    <p class="intro">An F-Droid repository is a folder on a web server. If the server goes away, so does the repo. Whoever runs it can also see who downloads what. Backpack keeps what F-Droid gets right (signed indexes, pinned app signers, your own repos) and moves the content off the server:</p>
+    <div class="grid3">
+      <div class="card"><h3>A repo is a key</h3><p>Each repository is an ed25519 key. Whatever it publishes is signed with that key, so the phone knows it's genuine no matter who delivered it.</p></div>
+      <div class="card"><h3>Content is addressed by hash</h3><p>The app list, the icons and the APKs are stored in Logos Storage under their content IDs. Any node that holds a CID can serve it, and nobody can change it.</p></div>
+      <div class="card"><h3>Updates are announced, not polled</h3><p>A new version is a tiny signed note, sent over Logos Delivery. The phone hears it live, or picks it up from the network's Store when it opens.</p></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="kicker">How it works</div>
+    <h2>Three pieces, and only one is ever small enough to send around</h2>
+    <p class="intro">Everything a repo contains is one of these three. They differ in size, in how they travel, and in what proves they're genuine.</p>
+    <div class="grid3">
+      <div class="card">
+        <h3>1 · The update note</h3><div class="size">≈ 300 bytes</div>
+        <p>Repo key, a version number (<code>seq</code>) and the CID of the current index. It's signed by the repo key.</p>
+        <span class="tag delivery">Logos Delivery</span><span class="tag web">HTTPS (optional, off by default)</span>
+      </div>
+      <div class="card">
+        <h3>2 · The index</h3><div class="size">a few KB</div>
+        <p>The app list: names, descriptions, licences, versions, each APK's SHA-256, its pinned signing certificate and its CID. Also signed by the repo key.</p>
+        <span class="tag storage">Logos Storage</span>
+      </div>
+      <div class="card">
+        <h3>3 · APKs and icons</h3><div class="size">MBs</div>
+        <p>Fetched by CID and checked against the index before anything is installed.</p>
+        <span class="tag storage">Logos Storage</span>
+      </div>
+    </div>
+
+    <div class="diagram" role="img" aria-label="Publisher uploads the index and APKs to Logos Storage and sends the signed note over Logos Delivery. The phone hears the note through the Loam app, then fetches the index and APKs from Logos Storage.">
+      <svg viewBox="0 0 900 330" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--dim)"/></marker></defs>
+        <rect class="box" x="20" y="110" width="200" height="110" rx="14"/>
+        <text x="120" y="145" text-anchor="middle" font-weight="700" font-size="17">Publisher</text>
+        <text x="120" y="170" text-anchor="middle" class="dim" font-size="13">backpack import-fdroid</text>
+        <text x="120" y="190" text-anchor="middle" class="dim" font-size="13">backpack publish</text>
+        <rect class="box" x="350" y="20" width="200" height="90" rx="14" style="stroke:var(--ok)"/>
+        <text x="450" y="55" text-anchor="middle" font-weight="700" font-size="16">Logos Delivery</text>
+        <text x="450" y="78" text-anchor="middle" class="dim" font-size="12.5">/backpack/1/&lt;key&gt;/json</text>
+        <text x="450" y="96" text-anchor="middle" class="dim" font-size="12.5">live + Store</text>
+        <rect class="box" x="350" y="220" width="200" height="90" rx="14" style="stroke:var(--accent)"/>
+        <text x="450" y="255" text-anchor="middle" font-weight="700" font-size="16">Logos Storage</text>
+        <text x="450" y="278" text-anchor="middle" class="dim" font-size="12.5">index · icons · APKs</text>
+        <text x="450" y="296" text-anchor="middle" class="dim" font-size="12.5">by CID</text>
+        <rect class="box" x="680" y="110" width="200" height="110" rx="14"/>
+        <text x="780" y="140" text-anchor="middle" font-weight="700" font-size="17">Phone</text>
+        <text x="780" y="163" text-anchor="middle" class="dim" font-size="13">Backpack</text>
+        <text x="780" y="183" text-anchor="middle" class="dim" font-size="13">+ the Loam app</text>
+        <text x="780" y="203" text-anchor="middle" class="dim" font-size="13">(shared node)</text>
+        <path class="net" d="M220 140 C 290 140, 290 65, 350 65" stroke="var(--ok)" marker-end="url(#ar)"/>
+        <text x="262" y="92" class="dim" font-size="12.5">① signed note</text>
+        <path class="net" d="M220 190 C 290 190, 290 265, 350 265" stroke="var(--accent)" marker-end="url(#ar)"/>
+        <text x="236" y="250" class="dim" font-size="12.5">upload index + APKs</text>
+        <path class="net" d="M550 65 C 610 65, 610 140, 680 140" stroke="var(--ok)" marker-end="url(#ar)"/>
+        <text x="600" y="92" class="dim" font-size="12.5">② newer seq?</text>
+        <path class="net" d="M550 265 C 610 265, 610 190, 680 190" stroke="var(--accent)" marker-end="url(#ar)"/>
+        <text x="572" y="250" class="dim" font-size="12.5">③ index, ④ APK</text>
+      </svg>
+    </div>
+    <p class="note">The phone adds a repo once, from a <code>backpack://</code> link (or QR) that carries the repo key, the first index and a Storage node to start from. After that, the note does the rest.</p>
+  </section>
+
+  <section id="trust">
+    <div class="kicker">Trust</div>
+    <h2>Every byte is checked against a key you already hold</h2>
+    <p class="intro">Backpack doesn't trust whoever delivered something: Delivery peers, Store nodes, Storage nodes, a web host. It only trusts the repo key from the link you opened and the signing keys of the apps already on your phone.</p>
+    <ul class="checks">
+      <li><b>The note and the index are signed by the repo key</b>An ed25519 signature over the exact bytes. Another repository, or anyone at all, can't produce one that opens with your key.</li>
+      <li><b>No going backwards</b>The phone remembers the highest <code>seq</code> it accepted and refuses anything older, so an attacker can't replay last month's list. The index's <code>seq</code> must also match the note that pointed to it.</li>
+      <li><b>APKs match the index</b>The downloaded file's SHA-256 must equal the signed index's.</li>
+      <li><b>App signers are pinned</b>The index pins each app's signing certificate. Backpack refuses an APK signed by any other key, and refuses one whose key differs from the copy already installed.</li>
+      <li><b>Same app, different key: you're told</b>If two of your repos list the same package under different signing keys, the app's page says only one of them can be the real publisher. Automatic updates only take versions signed by the key your installed copy already has.</li>
+      <li><b>F-Droid imports are verified first</b>Mirroring an F-Droid repo starts by checking its signed <code>index-v1.jar</code> against the repo fingerprint, then every APK's hash and signer.</li>
+    </ul>
+    <p class="note">Each repo shows its publisher key, so two repositories with the same name can be told apart.</p>
+  </section>
+
+  <section id="updates">
+    <div class="kicker">Updates</div>
+    <h2>Open the app; it's already checking</h2>
+    <p class="intro">Every time Backpack opens, it asks every source for the newest note and picks the highest valid <code>seq</code>. If the list changed, it fetches the new index from Storage. Then it updates your installed apps, unless you've switched that off.</p>
+    <div class="grid2">
+      <div class="card"><h3>Logos Delivery, through Loam</h3><p>Backpack doesn't run its own network node. It connects to the <a href="https://vpavlin.github.io/loam/">Loam</a> app's shared node, listens on each repo's topic and pulls the network's Store on start. A box that's always on re-sends every note twice a day, so the Store doesn't forget it. Anyone holding a note can re-send it, because it's signed.</p></div>
+      <div class="card"><h3>You can see where it came from</h3><p>Under each repo: <code>#7 came from Delivery (store) · Delivery (store) ✓ #7 · web off in Settings</code>. "Live" means it arrived while you were watching; "store" means it was published before Backpack started listening.</p></div>
+      <div class="card"><h3>Settings</h3><p><b>Install app updates automatically</b> (on): repos are always checked; this decides whether app updates are then installed by themselves. <b>Also check repositories' web addresses</b> (off): the HTTPS fallback for the note. Only the note ever comes from the web.</p></div>
+      <div class="card"><h3>Updates you didn't ask for, cancelled</h3><p>Every download has a progress bar and a Cancel button. Cancel an automatic update and Backpack won't start that version again by itself. Apps Backpack installed update without a prompt on Android 12+.</p></div>
+    </div>
+  </section>
+
+  <section id="speed">
+    <div class="kicker">Speed, honestly</div>
+    <h2>Slower than a web server today, and we measured why</h2>
+    <p class="intro">Storage's block exchange pays about a round trip per block, so speed depends more on distance than on bandwidth. Measured on 2026-10-23 with the same Storage build as the phone:</p>
+    <div class="tablewrap"><table>
+      <tr><th>Test</th><th>Speed</th></tr>
+      <tr><td>Same file, same server, plain HTTP</td><td class="num">10.6 MB/s</td></tr>
+      <tr><td>Same file, Storage p2p, 64 KiB blocks (the default)</td><td class="num">58–120 KB/s</td></tr>
+      <tr><td>Same file, Storage p2p, 512 KiB blocks (what Backpack uploads now)</td><td class="num">200 KB/s → 200–500 KB/s on a phone</td></tr>
+      <tr><td>Two local nodes, 26 ms delay added, 1 node serving</td><td class="num">129–256 KB/s</td></tr>
+      <tr><td>Same, 3 nodes serving the same file</td><td class="num">454 KB/s, 6.0 MB/s, 6.3 MB/s</td></tr>
+    </table></div>
+    <p class="note">The last row is why mirrors matter. Each extra node serving a repo adds requests in flight, and with large blocks that compounds. Mirrors would be desktops and always-on boxes that keep a repo's CIDs (phones only fetch).</p>
+  </section>
+
+  <section id="publish">
+    <div class="kicker">Publish</div>
+    <h2>A repo from the command line</h2>
+    <p class="intro">The CLI holds the repo key, uploads to a Storage node and signs everything. It can mirror an existing F-Droid repo after verifying it.</p>
+<pre><code>cd cli &amp;&amp; npm install
+./backpack.mjs init --name "My apps" --node http://&lt;storage-node&gt;:8080
+./backpack.mjs import-fdroid https://example.org/fdroid/repo --fingerprint &lt;SHA-256&gt;
+./backpack.mjs add my-app.apk --summary "…" --license MIT    # or add APKs directly
+./backpack.mjs config --pointer-put 'exec:ssh box ./send.sh "$BACKPACK_KEY"'   # announce over Delivery
+./backpack.mjs publish          # seq+1: index → Storage, note → Delivery (skips if nothing changed)
+./backpack.mjs verify --deep    # check it all as a phone would</code></pre>
+    <p class="note">The repo key stays on the publisher's machine (mode 0600). Lose it and the repo can't be updated; leak it and someone else can publish as you. Key rotation is on the list below.</p>
+  </section>
+
+  <section id="status">
+    <div class="kicker">Status</div>
+    <h2>What works, and what's next</h2>
+    <div class="grid2">
+      <div class="card"><h3>Works today</h3><p>Repos, signed indexes and notes; F-Droid import; installs with SHA-256 and signer checks; automatic updates; progress, cancel and uninstall; app detail pages; notes over Logos Delivery through Loam, with a 12-hour Store re-send; Settings. Backpack updates itself through Backpack.</p></div>
+      <div class="card"><h3>Not yet</h3><p>Mirrors ("I'm happy to serve these repos"). Key rotation and revocation, where a chain record (LEZ) is the candidate. A Wi-Fi-only switch. Background updates while the app is closed. Phones only (arm64); Delivery needs the Loam app installed.</p></div>
+    </div>
+    <h3 style="margin-top:28px">Design decisions</h3>
+    <ol class="adrs">
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0001-repos-on-logos-storage.md">A repo is a key; content lives in Logos Storage</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0002-security-model.md">Security model</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0003-updates-signed-pointer.md">Updates by a signed note</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0004-fdroid-import.md">Verified F-Droid import</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0005-phone-libstorage.md">The phone's Storage library</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0006-download-speed-block-size.md">Download speed and mirrors</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0007-decentralising-the-pointer.md">The note over Logos Delivery; a chain later, for keys</a></li>
+      <li><a href="https://github.com/vpavlin/backpack/blob/main/docs/adr/0008-automatic-updates.md">Automatic updates, cancel, sources, Settings</a></li>
+    </ol>
+  </section>
+</main>
+
+<footer><div class="wrap">
+  Backpack is built on <a href="https://logos.co">Logos</a> Storage and Delivery, with <a href="https://vpavlin.github.io/loam/">Loam</a> as the shared node on the phone.
+  Source: <a href="https://github.com/vpavlin/backpack">github.com/vpavlin/backpack</a> · MIT OR Apache-2.0.
+</div></footer>
+
+<script>
+(function(){
+  var b=document.getElementById('theme'), r=document.documentElement;
+  try{ var t=localStorage.getItem('bp-theme'); if(t) r.setAttribute('data-theme',t); }catch(e){}
+  b.addEventListener('click',function(){
+    var dark = r.getAttribute('data-theme') ? r.getAttribute('data-theme')==='dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark'; r.setAttribute('data-theme',next);
+    try{ localStorage.setItem('bp-theme',next); }catch(e){}
+  });
+})();
+</script>
+</body>
+</html>
