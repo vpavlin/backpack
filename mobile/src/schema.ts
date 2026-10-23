@@ -38,6 +38,28 @@ function privateIp(h: string): boolean {
   return h === "::1" || h === "::" || /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(h);
 }
 
+/** A multiaddr that points at this device or link-local, in any spelling: trailing dots, numeric
+ *  names, expanded or IPv4-mapped IPv6 (audit R-4). Hosts are normalised the same way a URL parser does. */
+export function selfAddr(a: string): boolean {
+  const m = /^\/(ip4|ip6|dns|dns4|dns6|dnsaddr)\/([^/]+)/i.exec(a);
+  if (!m) return true;                                   // not a host address we know how to judge: refuse
+  const proto = m[1].toLowerCase();
+  let h = m[2].toLowerCase().replace(/\.+$/, "");
+  try { h = new URL(`http://${proto === "ip6" || h.includes(":") ? `[${h}]` : h}/`).hostname.replace(/^\[|\]$/g, ""); }
+  catch { return true; }
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return true;
+  if (/^(127\.|0\.|169\.254\.)/.test(h) || h === "::" || h === "::1" || /^fe[89ab][0-9a-f]:/.test(h)) return true;
+  if (h.startsWith("::ffff:")) {
+    const v4 = h.slice(7);
+    if (/^[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(v4)) {   // ::ffff:7f00:1 → 127.0.0.1
+      const [x, y] = v4.split(":").map((p) => parseInt(p, 16));
+      return selfAddr(`/ip4/${x >> 8}.${x & 255}.${y >> 8}.${y & 255}`);
+    }
+    return selfAddr(`/ip4/${v4}`);
+  }
+  return false;
+}
+
 /** HTTPS pointer URL to a public host only (BP-11): no plain http, no loopback, private or link-local. */
 export function safePointerUrl(u: unknown): string | undefined {
   if (typeof u !== "string" || u.length > 500) return undefined;
@@ -62,7 +84,7 @@ export function peer(x: unknown, i = 0): Peer {
     peerId: match(p.peerId, PEER, `node ${i} peer id`),
     addrs: arr(p.addrs, LIMITS.addrs, `node ${i} addresses`, (a, j) => match(a, /^\/[A-Za-z0-9.:/_-]{3,200}$/, `node ${i} address ${j}`))
       // never dial this phone itself or link-local (audit R-4); LAN and mesh (fd..) nodes are legitimate repo hosts
-      .filter((a) => !/^\/(ip4\/(127\.|0\.|169\.254\.)|ip6\/(::1?\/|fe[89ab][0-9a-f]:|::ffff:)|dns[46]?\/(localhost|[^/]*\.(localhost|local))\/|dnsaddr\/(localhost|[^/]*\.(localhost|local))\/)/i.test(a)),
+      .filter((a) => !selfAddr(a)),
     spr: p.spr === undefined ? undefined : match(p.spr, /^spr:[A-Za-z0-9_-]{10,2000}$/, `node ${i} SPR`),
   };
 }

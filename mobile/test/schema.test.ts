@@ -1,7 +1,7 @@
 // schema.test.ts — real published indexes must validate; the audit's malicious shapes must not.
 // Run: node --experimental-strip-types test/schema.test.ts [index-envelope.json …]
 import { readFileSync } from "node:fs";
-import { validateIndex, validatePointer, safePointerUrl } from "../src/schema.ts";
+import { validateIndex, validatePointer, safePointerUrl, selfAddr } from "../src/schema.ts";
 
 let fail = 0;
 const ok = (c: boolean, what: string) => { if (!c) { fail++; console.log("FAIL", what); } };
@@ -34,5 +34,7 @@ ok(!!validatePointer({ key: K, seq: 3, index: CID, created: "x" }, K), "a good p
 throws(() => validatePointer({ key: K, seq: -1, index: CID, created: "x" }, K), "a negative seq");
 throws(() => validatePointer({ key: K, seq: 1, index: "../x", created: "x" }, K), "a non-CID pointer index");
 ok(safePointerUrl("https://10.0.0.1/x") === undefined && safePointerUrl("https://example.org/x") !== undefined, "safePointerUrl");
+for (const a of ["/dns4/localhost./tcp/1", "/dns4/foo.local./tcp/1", "/dns4/127.0.0.1/tcp/1", "/ip6/0:0:0:0:0:ffff:7f00:1/tcp/1", "/ip4/2130706433/tcp/1", "/ip6/::1/tcp/1", "/ip6/fe80::1/tcp/1"]) ok(selfAddr(a), `${a} refused (R-4)`);
+for (const a of ["/ip4/128.140.55.128/tcp/8499", "/ip6/fdb0:9afc::1/tcp/1", "/ip4/192.168.1.5/tcp/1", "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303"]) ok(!selfAddr(a), `${a} allowed`);
 console.log(fail ? `${fail} FAILED` : "schema: all ok");
 process.exit(fail ? 1 : 0);

@@ -103,4 +103,7 @@ install broadcast).
 | R-13 `--allow-sha1` couldn't rescue a SHA-1-only jar | it re-verifies with a policy that re-enables SHA-1 only (MD2/MD5/weak keys stay off) and prints a warning; tested: SHA-1-only passes only with the flag, MD5 never |
 | R-14 the 500-app check counted apps already in the repo | only new apps count |
 | R-15 the 1 MB index check counted UTF-16 units | UTF-8 bytes |
+| R-4 residual: `localhost.`, `foo.local.`, numeric names, expanded/mapped IPv6 | hosts are normalised (trailing dots, URL-parser IPv4/IPv6 forms, `::ffff:` → IPv4) before the self/link-local check (`selfAddr`, in the schema tests) |
+
+Third look (3d98c97): R-5, R-12, R-13, R-14, R-15 confirmed fixed; the R-4 residual above was the only item left.
 
