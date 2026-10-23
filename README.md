@@ -12,23 +12,35 @@ APKs, their icons and the repository index are all Storage objects fetched by CI
 
 ## How it works
 
+A repo is three kinds of things. Only the first one can ever touch the web, and it is signed:
+
+| What | Size | Carried by | Trust |
+|---|---|---|---|
+| **Update note** (the pointer): repo key, `seq`, index CID | ~300 B | **Logos Delivery** topic `/backpack/1/<key>/json` (live, and from Store on start); optionally each HTTPS address in the link (Settings, off by default) | signed by the repo key; a lower `seq` than the phone already has is refused |
+| **Index**: the app list, descriptions, versions, SHA-256s, pinned signers, APK CIDs | KBs | **Logos Storage**, by the CID in the note | signed by the repo key; `seq` must equal the note's |
+| **APKs and icons** | MBs | **Logos Storage**, by CID (512 KiB blocks) | SHA-256 from the index; the APK's signing certificate must be the pinned one (and the installed app's) |
+
 ```
-desktop:  backpack add app.apk | import-fdroid <repo> --fingerprint …   ──REST──▶ Storage node
-          backpack publish  → signed index (seq N) → CID                ──REST──▶ Storage node
-                            → signed pointer {key, seq N, index CID}   ──rsync/PUT──▶ any HTTPS host(s)
-phone:    backpack:// link (key + first index + nodes + pointer URLs)
-          on start: newest valid pointer (signature, seq > stored) → index CID → libstorage fetch
-          verify index (signature, key, seq ≥ stored, = pointer seq) → apps
-          install: fetch APK by CID → SHA-256 = index → signer = pinned signer (+ = installed app's)
-          → Android PackageInstaller
+publisher: backpack import-fdroid <repo> --fingerprint …   (or: add app.apk)   ──REST──▶ Storage node (VPS)
+           backpack publish  → signed index (seq N) → CID                    ──REST──▶ Storage node
+                             → signed note {key, seq N, index CID}           ──rsync──▶ VPS ──Delivery──▶ topic
+                               (re-sent every 12 h from the VPS so Store keeps it; ops/pointer-announce)
+phone:     backpack:// link once (key + first index + Storage node + optional HTTPS addresses)
+           on open: Loam shared node → topic (live + Store) [+ HTTPS if allowed] → newest valid note
+                    → index CID → Logos Storage → verify index → apps
+           updates: installed app + newer version + same signing key → download → verify → install
+           (Settings: "Install app updates automatically")
 ```
 
 Decisions are in **[docs/adr](docs/adr/)**:
 - [0001](docs/adr/0001-repos-on-logos-storage.md): a repo is an ed25519 key; all content lives in Logos Storage.
 - [0002](docs/adr/0002-security-model.md): the security model (signed index, monotonic seq, SHA-256, pinned APK signers).
-- [0003](docs/adr/0003-updates-signed-pointer.md): updates by a signed pointer that can be served from anywhere.
+- [0003](docs/adr/0003-updates-signed-pointer.md): updates by a signed note (pointer) that can be served from anywhere.
 - [0004](docs/adr/0004-fdroid-import.md): F-Droid import, only through a verified index.
 - [0005](docs/adr/0005-phone-libstorage.md): the phone's libstorage build (PR #1540) and why.
+- [0006](docs/adr/0006-download-speed-block-size.md): download speed, 512 KiB blocks, the progress bar, mirrors.
+- [0007](docs/adr/0007-decentralising-the-pointer.md): the note over Logos Delivery; a chain later, for keys.
+- [0008](docs/adr/0008-automatic-updates.md): automatic updates, details, uninstall, cancel, sources, Settings.
 
 ## Use
 
@@ -55,16 +67,20 @@ follows the pointer: every `publish` reaches it on the next app start or pull-to
 
 ## Limits (next steps)
 
-- **Pointers are HTTPS.** They're signed, so the host is trusted only for liveness. The next step
-  is a Logos Delivery topic per repo key (ADR 0003).
-- **No key rotation yet.** A new repo key means a new link (ADR 0002).
-- **Download speed.** libstorage (PR #1540) downloads at about 100–200 KB/s from the VPS node; a
-  50 MB APK takes minutes.
-- **arm64 phones only.** The x86_64 build is for emulator tests (`BACKPACK_EMU=1`).
+- **Delivery needs the Loam app** on the phone (its shared node). Without it, and with the web switch
+  off, a repo only moves forward when you open a newer link.
+- **The note is announced from one box** (the VPS hub). Anyone holding the note can re-send it (it is
+  signed), so mirrors can take over; that is not built yet.
+- **No key rotation yet.** A new repo key means a new link (ADR 0002; a chain is the candidate, ADR 0007).
+- **Download speed.** Storage's block exchange is round-trip bound: 200-500 KB/s from the VPS with
+  512 KiB blocks. More nodes serving a repo (mirrors) should help a lot (ADR 0006).
+- **arm64 phones only.** The x86_64 build is for emulator tests (`BACKPACK_EMU=1`); Loam's node does not
+  run on the emulator.
 
 ## Build the app
 
 ```sh
+git submodule update --init          # loam-transport (Delivery via the Loam app)
 cd mobile && npm install
 native/logosstorage/build-jni.sh          # JNI glue; libstorage.so per native/logosstorage/PROVENANCE (ADR 0005)
 npx expo prebuild --platform android --clean
