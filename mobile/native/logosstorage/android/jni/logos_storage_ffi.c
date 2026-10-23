@@ -236,6 +236,20 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageFetch(JNIEnv *env, jobje
     return call_finish(env, r, accepted, RESP_TIMEOUT_MS);
 }
 
+// Just the manifest (treeCid, datasetSize, …), without fetching any data block: Backpack checks the
+// size before it lets a download start (audit R-5).
+JNIEXPORT jstring JNICALL
+Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadManifest(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
+    (void)thiz;
+    const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
+    if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);
+    Resp *r = resp_alloc();
+    if (!r) { (*env)->ReleaseStringUTFChars(env, cidStr, cid); return (*env)->NewStringUTF(env, OOM_JSON); }
+    int accepted = storage_download_manifest((void *)(intptr_t)ctx, cid, false, false, (StorageCallback)storage_cb, r);
+    (*env)->ReleaseStringUTFChars(env, cidStr, cid);
+    return call_finish(env, r, accepted, 120000);
+}
+
 JNIEXPORT jstring JNICALL
 Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadInit(JNIEnv *env, jobject thiz,
         jlong ctx, jstring cidStr, jlong chunkSize, jboolean local) {

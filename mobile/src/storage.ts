@@ -180,15 +180,23 @@ async function getFileOn(c: string, cid: string, path: string, peers: Peer[], on
     try { onStage?.("connecting"); diag(`connect ${p.peerId.slice(-8)} ${p.addrs.join(",")}`); await LS.connect(c, p.peerId, p.addrs); diag("connect ok"); }
     catch (e: any) { diag(`connect FAILED: ${e?.message ?? e}`); }
   }
+  // size BEFORE any data block (audit R-5): storage_download_manifest fetches only the manifest
+  if (size.exact !== undefined || size.max !== undefined) {
+    checkCancel(cid);
+    onStage?.("checking size");
+    let m: string;
+    try { m = await LS.manifest(c, cid); diag(`manifest ${String(m).slice(0, 160)}`); }
+    catch (e: any) { diag(`manifest error: ${e?.message ?? e}`); checkCancel(cid); throw e; }
+    checkSize(m, size);
+  }
   // fetch pulls the blocks into the local store; download_stream alone (local=false) only gets the
   // manifest and then waits forever (verified on desktop). Scala's prebuilt arm64 libstorage crashed
   // inside fetch (SEGV on the phone and under arm64 translation); the library is now built fresh.
   for (let i = 1; ; i++) {
     checkCancel(cid);
-    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await watch(LS.fetch(c, cid), measure, "downloading", total, onProgress); diag(`fetch ok ${String(m).slice(0, 120)}`); checkSize(m, size); break; }
+    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await watch(LS.fetch(c, cid), measure, "downloading", total, onProgress); diag(`fetch ok ${String(m).slice(0, 120)}`); break; }
     catch (e: any) {
       diag(`fetch error: ${e?.message ?? e}`); checkCancel(cid);
-      if (e instanceof SizeError) { try { await LS.downloadCancel(c, cid); } catch { /* */ } dropBlocks(c, cid); throw e; }
       if (!isTimeout(e) || i >= 2) throw e;   // fewer retries: the storage thread is shared (R-11)
     }
   }

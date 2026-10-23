@@ -64,6 +64,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
   external fun storageExists(ctx: Long, cid: String): String
   external fun storageFetch(ctx: Long, cid: String): String
   external fun storageDownloadCancel(ctx: Long, cid: String): String
+  external fun storageDownloadManifest(ctx: Long, cid: String): String
   external fun storageDelete(ctx: Long, cid: String): String
   external fun storageDownloadInit(ctx: Long, cid: String, chunkSize: Long, local: Boolean): String
   external fun storageDownloadStream(ctx: Long, cid: String, chunkSize: Long, local: Boolean, filePath: String): String
@@ -131,6 +132,7 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
     }
   }
   @ReactMethod fun delete(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_delete") { storageDelete(BigInteger(ctx).toLong(), cid) }
+  @ReactMethod fun manifest(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_download_manifest") { storageDownloadManifest(BigInteger(ctx).toLong(), cid) }
   @ReactMethod fun fetch(ctx: String, cid: String, promise: Promise) = bg(promise, "storage_fetch") { storageFetch(BigInteger(ctx).toLong(), cid) }
 
   @ReactMethod

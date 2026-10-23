@@ -93,3 +93,14 @@ The auditor confirmed the fixes above and found partial fixes and new issues; ad
 Still needs a real device: BP-8 (no-prompt updates only for Backpack-installed apps) and BP-15 (pre-API-33
 install broadcast).
 
+### Second re-check (b1b55ef → 0.2.9)
+
+| Finding | Fix |
+|---|---|
+| R-5 the size check ran after `storage_fetch` (which already pulls the blocks) | the size comes from `storage_download_manifest` (manifest only, no data block) before any fetch |
+| R-4 residual: `/dns4/localhost`, `*.local`, `::ffff:` multiaddrs | refused |
+| R-12 refusing any SHA-1 string pushed users to `--allow-sha1` for f-droid.org | the JDK's stock policy (SHA-1 and MD5 disabled for jars) decides; f-droid.org verifies through its SHA-256 signer with no flag |
+| R-13 `--allow-sha1` couldn't rescue a SHA-1-only jar | it re-verifies with a policy that re-enables SHA-1 only (MD2/MD5/weak keys stay off) and prints a warning; tested: SHA-1-only passes only with the flag, MD5 never |
+| R-14 the 500-app check counted apps already in the repo | only new apps count |
+| R-15 the 1 MB index check counted UTF-16 units | UTF-8 bytes |
+

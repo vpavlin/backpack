@@ -62,7 +62,7 @@ export function peer(x: unknown, i = 0): Peer {
     peerId: match(p.peerId, PEER, `node ${i} peer id`),
     addrs: arr(p.addrs, LIMITS.addrs, `node ${i} addresses`, (a, j) => match(a, /^\/[A-Za-z0-9.:/_-]{3,200}$/, `node ${i} address ${j}`))
       // never dial this phone itself or link-local (audit R-4); LAN and mesh (fd..) nodes are legitimate repo hosts
-      .filter((a) => !/^\/(ip4\/(127\.|0\.|169\.254\.)|ip6\/(::1?\/|fe[89ab][0-9a-f]:))/i.test(a)),
+      .filter((a) => !/^\/(ip4\/(127\.|0\.|169\.254\.)|ip6\/(::1?\/|fe[89ab][0-9a-f]:|::ffff:)|dns[46]?\/(localhost|[^/]*\.(localhost|local))\/|dnsaddr\/(localhost|[^/]*\.(localhost|local))\/)/i.test(a)),
     spr: p.spr === undefined ? undefined : match(p.spr, /^spr:[A-Za-z0-9_-]{10,2000}$/, `node ${i} SPR`),
   };
 }

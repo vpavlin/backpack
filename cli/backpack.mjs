@@ -227,18 +227,26 @@ async function importFdroid() {
   try { fs.writeFileSync(jar, await fetchChecked(`${repoUrl}/entry.jar`, null, 1 << 20)); }
   catch (e) { die(`${repoUrl}/entry.jar: ${e.message} (Backpack imports only F-Droid v2 repos)`); }
   // 1. entry.jar must verify with the JDK's DEFAULT algorithm policy, signed by the cert the user vouched for
-  let ver;
-  try { ver = execFileSync("jarsigner", ["-verify", jar], { encoding: "utf8" }); } catch (e) { die(`entry.jar does not verify: ${e.stdout || e.message}`); }
-  if (!/jar verified/.test(ver)) die(`entry.jar does not verify:\n${ver}`);
-  // SHA-1 is collision-prone; JDKs still accept a SHA1withRSA *signature* by default, and f-droid.org signs
-  // its entry.jar that way (audit BP-3 partial). Refuse it unless the user explicitly accepts the risk.
-  const algs = execFileSync("jarsigner", ["-verify", "-verbose", "-certs", jar], { encoding: "utf8" });
-  if (/SHA1withRSA|SHA-1|SHA1-Digest/i.test(algs) && !flag("allow-sha1")) {
-    die("entry.jar is signed or digested with SHA-1. SHA-1 collisions are practical, so a hostile mirror could forge it.\n" +
-        "If you trust the source and the path to it, re-run with --allow-sha1 (f-droid.org itself needs this today).");
+  // 1. entry.jar must verify with the JDK's STOCK policy (which disables SHA-1 and MD5 for jars), signed by
+  //    the cert the user vouched for. f-droid.org's jar carries a SHA-1 and a SHA-256 signer: the stock
+  //    policy verifies it through the SHA-256 one (audit R-12). Only a SHA-1-ONLY jar needs --allow-sha1,
+  //    which re-enables SHA-1 and nothing else: MD2, MD5 and weak keys stay disabled (R-13).
+  const allowSha1 = flag("allow-sha1");
+  const sha1Policy = path.join(t, "sha1-only.security");
+  fs.writeFileSync(sha1Policy, "jdk.jar.disabledAlgorithms=MD2, MD5, RSA keySize < 2048, DSA keySize < 2048, EC keySize < 224, include jdk.disabled.namedCurves\n");
+  const jarsign = (extra) => execFileSync("jarsigner", [...extra, "-verify", jar], { encoding: "utf8" });
+  let ver = "", policy = [];
+  try { ver = jarsign([]); } catch (e) { ver = String(e.stdout || e.message); }
+  if (!/jar verified/.test(ver)) {
+    if (!allowSha1) die(`entry.jar does not verify with the JDK's default algorithms:\n${ver.split("\n").slice(0, 4).join("\n")}\n` +
+                        "If it is signed with SHA-1 only and you trust the source and the path to it, re-run with --allow-sha1.");
+    policy = [`-J-Djava.security.properties=${sha1Policy}`];
+    try { ver = jarsign(policy); } catch (e) { die(`entry.jar does not verify even with SHA-1 allowed: ${e.stdout || e.message}`); }
+    if (!/jar verified/.test(ver)) die(`entry.jar does not verify even with SHA-1 allowed:\n${ver}`);
+    console.log("WARNING: entry.jar is verified with SHA-1 (--allow-sha1): a hostile mirror able to forge a SHA-1 collision could fake it.");
   }
-  const certs = execFileSync("keytool", ["-printcert", "-jarfile", jar], { encoding: "utf8" });
-  const fps = [...certs.matchAll(/SHA256: ([0-9A-F:]+)/g)].map((m) => m[1].replace(/:/g, "").toLowerCase());
+  const certs = execFileSync("keytool", [...policy, "-printcert", "-jarfile", jar], { encoding: "utf8" });
+  const fps = [...new Set([...certs.matchAll(/SHA256: ([0-9A-F:]+)/g)].map((m) => m[1].replace(/:/g, "").toLowerCase()))];
   if (fps.length !== 1 || fps[0] !== fingerprint) die(`entry.jar is signed by ${fps.join(", ") || "nobody"}, not ${fingerprint}`);
   const entry = JSON.parse(execFileSync("unzip", ["-p", jar, "entry.json"], { maxBuffer: 1 << 20, encoding: "utf8" }));
   // freshness (audit R-6): never go back to an older entry from the same source, and refuse one older than
@@ -258,7 +266,7 @@ async function importFdroid() {
   try { index = JSON.parse((await fetchChecked(`${repoUrl}/${ix.name.replace(/^\//, "")}`, ix.sha256, Number(ix.size))).toString("utf8")); }
   catch (e) { die(`index-v2.json: ${e.message}`); }
   const pkgsAll = Object.entries(index.packages ?? {}).filter(([, p]) => p && typeof p === "object");   // R-7
-  const wanted = only.length ? pkgsAll.filter(([k]) => only.includes(k)).length : pkgsAll.length;
+  const wanted = (only.length ? pkgsAll.filter(([k]) => only.includes(k)) : pkgsAll).filter(([k]) => !s.apps[k]).length;   // new apps only (R-14)
   if (wanted + Object.keys(s.apps).length > MAX_APPS) die(`importing ${wanted} apps would take this repo over ${MAX_APPS}, more than a phone accepts; pick some with --only pkg,pkg (audit R-2)`);
   const repoName = index.repo?.name?.["en-US"] ?? index.repo?.name;
   console.log(`verified F-Droid v2 index "${typeof repoName === "string" ? repoName : "?"}" (${fingerprint.slice(0, 16)}…), ${pkgsAll.length} apps`);
@@ -325,7 +333,7 @@ async function publish() {
   const nodes = nodesNow;
   if (apps.length > MAX_APPS) die(`${apps.length} apps: phones accept at most ${MAX_APPS} per repo`);
   const index = envelope("index", { v: 2, name: s.name, key: pubOf(), seq, created, nodes, pointers: s.pointers.get, apps });
-  if (JSON.stringify(index).length > 1 << 20) die("the signed index is over 1 MB, more than a phone accepts: trim descriptions or apps");
+  if (Buffer.byteLength(JSON.stringify(index), "utf8") > 1 << 20) die("the signed index is over 1 MB, more than a phone accepts: trim descriptions or apps");
   const t = tmpDir();
   const indexFile = path.join(t, "backpack-index.json");
   fs.writeFileSync(indexFile, JSON.stringify(index));
