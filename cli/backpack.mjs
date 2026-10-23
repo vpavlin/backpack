@@ -199,14 +199,23 @@ async function add() {
 // Nothing from the index is ever used as a local path (audit BP-1): files go to generated names.
 const SAFE_REMOTE = /^\/?[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;   // no "..", no leading dots, no backslashes
 const PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
+// Streams with a hard byte cap: never holds more than maxBytes, whatever the server sends (audit R-7).
 async function fetchChecked(url, sha, maxBytes) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  if (maxBytes && buf.length > maxBytes) throw new Error(`${buf.length} bytes, over the ${maxBytes} limit`);
+  const declared = Number(r.headers.get("content-length") ?? "0");
+  if (maxBytes && declared > maxBytes) throw new Error(`${declared} bytes, over the ${maxBytes} limit`);
+  const parts = []; let n = 0;
+  for await (const chunk of r.body) {
+    n += chunk.length;
+    if (maxBytes && n > maxBytes) { try { await r.body.cancel(); } catch { /* */ } throw new Error(`over the ${maxBytes}-byte limit`); }
+    parts.push(chunk);
+  }
+  const buf = Buffer.concat(parts.map((c) => Buffer.from(c)));
   if (sha && sha256hex(buf) !== sha) throw new Error("SHA-256 doesn't match the signed index");
   return buf;
 }
+const MAX_APPS = 500;   // what a phone accepts in one repo (mobile/src/schema.ts LIMITS.apps)
 async function importFdroid() {
   const s = load();
   const fingerprint = (opt("fingerprint", null) ?? die("--fingerprint <sha256 of the F-Droid repo cert> is required")).replace(/[: ]/g, "").toLowerCase();
@@ -215,24 +224,42 @@ async function importFdroid() {
   const repoUrl = (args[0] ?? die("import-fdroid <repo URL> --fingerprint …")).replace(/\/+$/, "");
   const t = tmpDir();
   const jar = path.join(t, "entry.jar");
-  const r = await fetch(`${repoUrl}/entry.jar`);
-  if (!r.ok) die(`${repoUrl}/entry.jar: HTTP ${r.status} (Backpack imports only F-Droid v2 repos)`);
-  fs.writeFileSync(jar, Buffer.from(await r.arrayBuffer()));
+  try { fs.writeFileSync(jar, await fetchChecked(`${repoUrl}/entry.jar`, null, 1 << 20)); }
+  catch (e) { die(`${repoUrl}/entry.jar: ${e.message} (Backpack imports only F-Droid v2 repos)`); }
   // 1. entry.jar must verify with the JDK's DEFAULT algorithm policy, signed by the cert the user vouched for
   let ver;
   try { ver = execFileSync("jarsigner", ["-verify", jar], { encoding: "utf8" }); } catch (e) { die(`entry.jar does not verify: ${e.stdout || e.message}`); }
   if (!/jar verified/.test(ver)) die(`entry.jar does not verify:\n${ver}`);
+  // SHA-1 is collision-prone; JDKs still accept a SHA1withRSA *signature* by default, and f-droid.org signs
+  // its entry.jar that way (audit BP-3 partial). Refuse it unless the user explicitly accepts the risk.
+  const algs = execFileSync("jarsigner", ["-verify", "-verbose", "-certs", jar], { encoding: "utf8" });
+  if (/SHA1withRSA|SHA-1|SHA1-Digest/i.test(algs) && !flag("allow-sha1")) {
+    die("entry.jar is signed or digested with SHA-1. SHA-1 collisions are practical, so a hostile mirror could forge it.\n" +
+        "If you trust the source and the path to it, re-run with --allow-sha1 (f-droid.org itself needs this today).");
+  }
   const certs = execFileSync("keytool", ["-printcert", "-jarfile", jar], { encoding: "utf8" });
   const fps = [...certs.matchAll(/SHA256: ([0-9A-F:]+)/g)].map((m) => m[1].replace(/:/g, "").toLowerCase());
   if (fps.length !== 1 || fps[0] !== fingerprint) die(`entry.jar is signed by ${fps.join(", ") || "nobody"}, not ${fingerprint}`);
   const entry = JSON.parse(execFileSync("unzip", ["-p", jar, "entry.json"], { maxBuffer: 1 << 20, encoding: "utf8" }));
+  // freshness (audit R-6): never go back to an older entry from the same source, and refuse one older than
+  // its own maxAge (days) unless --allow-stale: a mirror replaying an old signed entry can't hide updates
+  const ts = Number(entry.timestamp);
+  if (!Number.isFinite(ts)) die("entry.json has no timestamp");
+  s.fdroidSeen ??= {};
+  if (s.fdroidSeen[fingerprint] && ts < s.fdroidSeen[fingerprint]) die(`entry.json is older (${new Date(ts).toISOString()}) than one already seen from this repo (${new Date(s.fdroidSeen[fingerprint]).toISOString()}): refusing a rollback`);
+  const maxAgeDays = Number(entry.maxAge ?? 0);
+  if (maxAgeDays > 0 && Date.now() - ts > maxAgeDays * 86400_000 && !flag("allow-stale")) die(`entry.json is ${Math.round((Date.now() - ts) / 86400_000)} days old, over its maxAge of ${maxAgeDays}: refusing (--allow-stale to accept)`);
   // 2. index-v2.json, pinned by entry.json
   const ix = entry.index ?? die("entry.json has no index");
   if (!SAFE_REMOTE.test(ix.name ?? "") || !/^[0-9a-f]{64}$/.test(ix.sha256 ?? "")) die("entry.json: bad index name or hash");
   let index;
-  try { index = JSON.parse((await fetchChecked(`${repoUrl}/${ix.name.replace(/^\//, "")}`, ix.sha256, 64 << 20)).toString("utf8")); }
+  const ixMax = 256 << 20;   // f-droid.org's index-v2 is ~67 MB (audit R-2)
+  if (!(Number(ix.size) > 0 && Number(ix.size) <= ixMax)) die(`index-v2.json is ${ix.size} bytes; the limit is ${ixMax}`);
+  try { index = JSON.parse((await fetchChecked(`${repoUrl}/${ix.name.replace(/^\//, "")}`, ix.sha256, Number(ix.size))).toString("utf8")); }
   catch (e) { die(`index-v2.json: ${e.message}`); }
-  const pkgsAll = Object.entries(index.packages ?? {});
+  const pkgsAll = Object.entries(index.packages ?? {}).filter(([, p]) => p && typeof p === "object");   // R-7
+  const wanted = only.length ? pkgsAll.filter(([k]) => only.includes(k)).length : pkgsAll.length;
+  if (wanted + Object.keys(s.apps).length > MAX_APPS) die(`importing ${wanted} apps would take this repo over ${MAX_APPS}, more than a phone accepts; pick some with --only pkg,pkg (audit R-2)`);
   const repoName = index.repo?.name?.["en-US"] ?? index.repo?.name;
   console.log(`verified F-Droid v2 index "${typeof repoName === "string" ? repoName : "?"}" (${fingerprint.slice(0, 16)}…), ${pkgsAll.length} apps`);
   const loc = (o) => (o && typeof o === "object" ? (o["en-US"] ?? o.en ?? Object.values(o)[0]) : o);
@@ -275,6 +302,7 @@ async function importFdroid() {
     }
     if (meta.iconFile) fs.rmSync(meta.iconFile, { force: true });
   }
+  s.fdroidSeen[fingerprint] = ts;
   save(s);
   console.log(`${added} version(s) imported; run \`backpack publish\` to make them visible`);
 }
@@ -295,7 +323,9 @@ async function publish() {
   const seq = (s.seq ?? 0) + 1;
   const created = new Date().toISOString();
   const nodes = nodesNow;
+  if (apps.length > MAX_APPS) die(`${apps.length} apps: phones accept at most ${MAX_APPS} per repo`);
   const index = envelope("index", { v: 2, name: s.name, key: pubOf(), seq, created, nodes, pointers: s.pointers.get, apps });
+  if (JSON.stringify(index).length > 1 << 20) die("the signed index is over 1 MB, more than a phone accepts: trim descriptions or apps");
   const t = tmpDir();
   const indexFile = path.join(t, "backpack-index.json");
   fs.writeFileSync(indexFile, JSON.stringify(index));
@@ -360,7 +390,8 @@ async function verifyCmd() {
   if (body && deep) {
     // every version phones can see (audit BP-14): bytes, SHA-256, pinned signer (required: BP-6), and the
     // APK's own package name and versionCode against the index entry (BP-5)
-    for (const a of body.apps) for (const v of a.versions) {
+    if (!Array.isArray(body.apps)) { bad("index: apps is not a list"); body.apps = []; }   // R-8
+    for (const a of body.apps) for (const v of (Array.isArray(a?.versions) ? a.versions : (bad(`${a?.id}: versions is not a list`), []))) {
       try {
         if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("no pinned signer: phones refuse to install it");
         const bytes = await download(node, v.cid);
@@ -412,7 +443,7 @@ if (!run) {
   init --name N [--node URL]
   config [--node URL] [--pointer-get URL]… [--pointer-put rsync:dest|put:URL|exec:CMD]… [--clear-pointers]
   add APK… [--name --summary --description --license]
-  import-fdroid <repo URL> --fingerprint SHA256 [--versions N] [--only pkg,pkg]
+  import-fdroid <repo URL> --fingerprint SHA256 [--versions N] [--only pkg,pkg] [--allow-sha1] [--allow-stale]
   publish [--force]       (skips when nothing changed)
   verify [backpack://link] [--deep]
   rehost                 re-upload APKs with 512 KiB blocks (faster downloads, ADR 0006)

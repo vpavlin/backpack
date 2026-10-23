@@ -33,16 +33,25 @@ const match = (v: unknown, re: RegExp, what: string): string => (typeof v === "s
 /** Only plain web links may be opened from a repo's data (BP-18). */
 export const httpUrl = (v: unknown): string | undefined => (typeof v === "string" && v.length <= 500 && /^https?:\/\/[^\s]+$/i.test(v) ? v : undefined);
 
+function privateIp(h: string): boolean {
+  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|22[4-9]\.|2[3-5]\d\.)/.test(h)) return true;
+  return h === "::1" || h === "::" || /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(h);
+}
+
 /** HTTPS pointer URL to a public host only (BP-11): no plain http, no loopback, private or link-local. */
 export function safePointerUrl(u: unknown): string | undefined {
   if (typeof u !== "string" || u.length > 500) return undefined;
   let url: URL;
   try { url = new URL(u); } catch { return undefined; }
   if (url.protocol !== "https:" || url.username || url.password) return undefined;
-  const h = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return undefined;
-  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(h)) return undefined;
-  if (h === "::1" || h === "::" || /^(fc|fd|fe8|fe9|fea|feb)/.test(h)) return undefined;
+  // trailing dots and IPv4-mapped IPv6 are the same hosts (audit R-3). The WHATWG URL parser already
+  // turns numeric IPv4 forms (2130706433, 0x7f.1) into dotted quads.
+  const h = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (!h || h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".lan") || h.endsWith(".home.arpa")) return undefined;
+  if (privateIp(h)) return undefined;
+  if (h.startsWith("::ffff:") && (privateIp(h.slice(7)) || /^[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(h.slice(7)))) return undefined;
+  // Not caught here: public names that RESOLVE to private addresses (localtest.me, DNS rebinding). The
+  // web source is off by default and only signed pointers are accepted from it; see ADR 0002.
   return url.toString();
 }
 
@@ -51,7 +60,9 @@ export function peer(x: unknown, i = 0): Peer {
   if (!p || typeof p !== "object") fail(`node ${i}`);
   return {
     peerId: match(p.peerId, PEER, `node ${i} peer id`),
-    addrs: arr(p.addrs, LIMITS.addrs, `node ${i} addresses`, (a, j) => match(a, /^\/[A-Za-z0-9.:/_-]{3,200}$/, `node ${i} address ${j}`)),
+    addrs: arr(p.addrs, LIMITS.addrs, `node ${i} addresses`, (a, j) => match(a, /^\/[A-Za-z0-9.:/_-]{3,200}$/, `node ${i} address ${j}`))
+      // never dial this phone itself or link-local (audit R-4); LAN and mesh (fd..) nodes are legitimate repo hosts
+      .filter((a) => !/^\/(ip4\/(127\.|0\.|169\.254\.)|ip6\/(::1?\/|fe[89ab][0-9a-f]:))/i.test(a)),
     spr: p.spr === undefined ? undefined : match(p.spr, /^spr:[A-Za-z0-9_-]{10,2000}$/, `node ${i} SPR`),
   };
 }

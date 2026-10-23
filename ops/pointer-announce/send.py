@@ -44,6 +44,8 @@ def read_pointer(d, name):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ValueError("not a regular file")
+        if st.st_nlink != 1:  # a hardlink to another file (audit R-10); the signature check would refuse it anyway
+            raise ValueError("has other hard links")
         if st.st_size > MAX:
             raise ValueError(f"{st.st_size} bytes, over {MAX}")
         raw = os.read(fd, MAX + 1)

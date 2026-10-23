@@ -71,3 +71,25 @@ Accepted, not changed: BP-13 (the phone relies on libstorage's content addressin
 icons; the index is also signed, and APKs are hashed), and `storageNew` leaking a context on timeout
 (it can't be cancelled; it happens once per process at most).
 
+### Re-check (same day, cb7281f → 0.2.8)
+
+The auditor confirmed the fixes above and found partial fixes and new issues; addressed in 0.2.8:
+
+| Finding | Fix |
+|---|---|
+| R-1 a newer link for a known repo was ignored (regression) | the link's index CID is used again; the signed seq still refuses rollback |
+| R-2 the real f-droid.org (67 MB index, 4,810 apps) couldn't be imported | index cap from `entry.json` (≤ 256 MB); import refuses to take a repo over 500 apps (`--only`); `publish` refuses > 500 apps or a > 1 MB index. Tested: `import-fdroid https://f-droid.org/repo --only org.fdroid.fdroid --allow-sha1` |
+| BP-3 partial: f-droid.org's entry.jar is SHA1withRSA | SHA-1 signatures/digests are refused unless `--allow-sha1` (the user accepts the risk for that source) |
+| R-3/BP-11 pointer URL bypasses | trailing dots, IPv4-mapped IPv6 and multicast refused; a response redirected to a non-public address is discarded. Not caught: public names that resolve to private addresses (the web source is off by default; only signed pointers are accepted from it) |
+| R-4 private multiaddrs | loopback and link-local are dropped; LAN and mesh (fd..) addresses stay, real repo nodes live there |
+| R-5/BP-22 size caps after the download | `fetch` returns the manifest first: an APK must have exactly the signed size, the index ≤ 1 MB, an icon ≤ 512 KiB, or the download is cancelled before any data block |
+| R-6 entry.json freshness | never older than the last entry seen from the same source; refused past its `maxAge` unless `--allow-stale` |
+| R-7 unbounded entry.jar, buffering before the cap, null packages | streamed downloads with a hard cap (entry.jar 1 MiB); null packages skipped |
+| R-8 `verify --deep` crashed on a malformed index | shape checks before iterating |
+| R-9 a repo added while Delivery was starting/unavailable was never joined | joined after start; an unavailable Loam is retried (once a minute at most) |
+| R-10 hardlinks in the pointer directory | refused (`st_nlink != 1`) |
+| R-11 a slow CID occupies the single storage thread | fewer retries (fetch 2, download 3); the real fix is Loam's job queue (loam-transport ADR 0020) |
+
+Still needs a real device: BP-8 (no-prompt updates only for Backpack-installed apps) and BP-15 (pre-API-33
+install broadcast).
+

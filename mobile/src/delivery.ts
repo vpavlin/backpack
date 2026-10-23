@@ -27,7 +27,8 @@ const keys = new Set<string>();
 const best = new Map<string, Pointer>();            // repo key → newest valid pointer seen over Delivery
 const via = new Map<string, "live" | "store">();    // how that pointer arrived
 const heard = new Map<string, number>();            // repo key → when a valid note last arrived (any seq)
-let listeningSince = 0;                             // a pointer signed before this came from Store, not live
+let listeningSince = 0;
+let unavailableAt = 0;                             // a pointer signed before this came from Store, not live
 let onPointer: ((p: Pointer) => void) | null = null;
 
 /** Newest pointer for `key` received over Delivery (live or from Store), if any. */
@@ -74,7 +75,11 @@ export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promi
   onPointer = cb;
   const fresh = repoKeys.filter((k) => !keys.has(k));
   fresh.forEach((k) => keys.add(k));
-  if (state === "unavailable" || state === "starting") return;
+  if (state === "starting") return;                   // joined right after start() (audit R-9)
+  if (state === "unavailable") {                     // Loam may have appeared since: retry, at most once a minute
+    if (Date.now() - unavailableAt < 60_000) return;
+    state = "off";
+  }
   try {
     if (state === "on") {
       if (fresh.length) { await T.join(fresh.map(topicFor)); pull(); }
@@ -83,12 +88,15 @@ export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promi
     state = "starting"; listeningSince = Date.now();
     // must come before anything that wires the transport backend (loam-integrate-app §2)
     T.preferServiceBackend(true, APP_ID);
-    await T.start({ deviceId: await deviceId(), topics: [...keys].map(topicFor), onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
+    const startedWith = new Set(keys);
+    await T.start({ deviceId: await deviceId(), topics: [...startedWith].map(topicFor), onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
     state = "on"; lastError = "";
+    const late = [...keys].filter((k) => !startedWith.has(k));   // repos added while the node was starting
+    if (late.length) await T.join(late.map(topicFor));
     storage.diag(`delivery: listening on ${keys.size} repo topic(s) via ${T.usingServiceBackend() ? "Loam" : "own node"}`);
     pull();
   } catch (e: any) {
-    state = "unavailable"; lastError = String(e?.message ?? e);
+    state = "unavailable"; unavailableAt = Date.now(); lastError = String(e?.message ?? e);
     storage.diag(`delivery: unavailable (${lastError}); using web pointers only`);
   }
 }

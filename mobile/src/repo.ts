@@ -87,6 +87,7 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
       const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 15000);
       const r = await fetch(url, { signal: ctl.signal, headers: { "Cache-Control": "no-cache" } }); clearTimeout(tm);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (r.url && r.url !== url && !safePointerUrl(r.url)) throw new Error("redirected to a non-public address: refusing");   // R-3
       const text = await r.text();
       if (text.length > 8192) throw new Error("too large for a pointer");
       const p = validatePointer(openEnvelope(JSON.parse(text), repo.key, "pointer"), repo.key);
@@ -119,7 +120,7 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
   const peers = uniq([...(ptr?.nodes ?? []), ...repo.peers].map((p) => JSON.stringify(p))).map((s) => JSON.parse(s)).slice(0, LIMITS.nodes);
   if (!isCid(cid)) throw new Error("the index CID is malformed");
   const dir = await storage.filesDir();
-  const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress);
+  const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress, { max: LIMITS.indexBytes });
   if (!raw) throw new Error("the index is empty or larger than 1 MB: refusing");
   const index = validateIndex(openEnvelope(JSON.parse(raw), repo.key, "index"), repo.key);
   const seq = index.seq;
@@ -143,7 +144,9 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
 export async function addFromLink(link: string, repos: Repo[], onStage?: (s: string) => void): Promise<Repo[]> {
   const r = parseLink(link);
   const known = repos.find((x) => x.key === r.key);
-  const merged: Repo = known ? { ...known, indexCid: known.index ? known.indexCid : r.indexCid } : r;
+  // the link's index CID IS used (audit R-1): the index is signed and its seq can't go below ours, so a
+  // newer link moves the repo forward and an older one is refused; only unsigned extras are ignored
+  const merged: Repo = known ? { ...known, indexCid: r.indexCid } : r;
   let next: Repo;
   try { next = await refresh(merged, onStage); }
   catch (e: any) {
@@ -159,8 +162,7 @@ export async function iconPath(repo: Repo, app: App): Promise<string | null> {
   if (!app.icon || !isCid(app.icon)) return null;
   const path = `${await storage.filesDir()}/icons/${app.icon}.img`;
   if ((await storage.fileSize(path)) > 0) return path;
-  await storage.getFile(app.icon, path, repo.peers);
-  if ((await storage.fileSize(path)) > LIMITS.iconBytes) { await Installer.deleteFile(path); return null; }   // audit BP-22
+  await storage.getFile(app.icon, path, repo.peers, undefined, 0, undefined, { max: LIMITS.iconBytes });   // capped before download (R-5)
   return path;
 }
 
@@ -227,7 +229,7 @@ export async function install(repo: Repo, app: App, v: Version, onStage: (s: str
   if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("this version doesn't pin a signing key: refusing to install it");   // BP-6
   const have = await storage.fileSize(path);
   if (have !== v.size) {
-    try { await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress); }
+    try { await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress, { exact: v.size }); }
     catch (e) { if (storage.isCancelled(e)) { await Installer.deleteFile(path); return "download-cancelled"; } throw e; }
   }
   onStage("checking");

@@ -137,6 +137,16 @@ async function watch<T>(work: Promise<T>, measure: () => Promise<number>, phase:
 // The flag stops getFile's retries and turns the error into CANCELLED.
 const cancelled = new Set<string>();
 export const CANCELLED = "download cancelled";
+class SizeError extends Error {}
+// fetch resolves with the CID's manifest; its datasetSize is the file's size, known before any data block
+function checkSize(manifest: unknown, rule: SizeRule) {
+  if (rule.exact === undefined && rule.max === undefined) return;
+  const m = /"datasetSize"\s*:\s*(\d+)/.exec(String(manifest ?? ""));
+  if (!m) throw new SizeError("the file's size is unknown: refusing");
+  const n = Number(m[1]);
+  if (rule.exact !== undefined && n !== rule.exact) throw new SizeError(`the file is ${n} bytes, the repo says ${rule.exact}: refusing`);
+  if (rule.max !== undefined && n > rule.max) throw new SizeError(`the file is ${n} bytes, over the ${rule.max}-byte limit: refusing`);
+}
 export const isCancelled = (e: unknown) => String((e as any)?.message ?? e) === CANCELLED;
 export async function cancel(cid: string): Promise<void> {
   cancelled.add(cid);
@@ -146,9 +156,13 @@ export async function cancel(cid: string): Promise<void> {
 function checkCancel(cid: string) { if (cancelled.has(cid)) throw new Error(CANCELLED); }
 async function dropBlocks(c: string, cid: string) { try { await LS.delete(c, cid); } catch { /* best effort: the data dir is wiped at launch anyway */ } }
 
-export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void, total = 0, onProgress?: (p: Progress) => void): Promise<string> {
+/** Size rules checked against the manifest BEFORE the download (audit R-5/BP-22): `exact` for an APK
+ *  (the signed index says its size), `max` for an index or icon. */
+export interface SizeRule { exact?: number; max?: number }
+
+export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void, total = 0, onProgress?: (p: Progress) => void, size: SizeRule = {}): Promise<string> {
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));
-  try { const r = await getFileOn(c, cid, path, peers, onStage, total, onProgress); cancelled.delete(cid); return r; }
+  try { const r = await getFileOn(c, cid, path, peers, onStage, total, onProgress, size); cancelled.delete(cid); return r; }
   catch (e) {
     if (!cancelled.has(cid)) throw e;
     cancelled.delete(cid); dropBlocks(c, cid);
@@ -156,7 +170,7 @@ export async function getFile(cid: string, path: string, peers: Peer[], onStage?
   }
 }
 
-async function getFileOn(c: string, cid: string, path: string, peers: Peer[], onStage: ((s: string) => void) | undefined, total: number, onProgress?: (p: Progress) => void): Promise<string> {
+async function getFileOn(c: string, cid: string, path: string, peers: Peer[], onStage: ((s: string) => void) | undefined, total: number, onProgress: ((p: Progress) => void) | undefined, size: SizeRule): Promise<string> {
   // One progress measure across both calls: blocks landing in the node's store (fetch) or the file
   // growing (download_stream), whichever is further. Never goes backwards.
   const store = `${await LS.filesDir()}/storage`, base = await dirSize(store);
@@ -171,12 +185,16 @@ async function getFileOn(c: string, cid: string, path: string, peers: Peer[], on
   // inside fetch (SEGV on the phone and under arm64 translation); the library is now built fresh.
   for (let i = 1; ; i++) {
     checkCancel(cid);
-    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await watch(LS.fetch(c, cid), measure, "downloading", total, onProgress); diag(`fetch ok ${String(m).slice(0, 120)}`); break; }
-    catch (e: any) { diag(`fetch error: ${e?.message ?? e}`); checkCancel(cid); if (!isTimeout(e) || i >= 3) throw e; }
+    try { onStage?.(i === 1 ? "fetching" : `fetching (try ${i})`); diag(`fetch ${cid.slice(-10)} try ${i}`); const m = await watch(LS.fetch(c, cid), measure, "downloading", total, onProgress); diag(`fetch ok ${String(m).slice(0, 120)}`); checkSize(m, size); break; }
+    catch (e: any) {
+      diag(`fetch error: ${e?.message ?? e}`); checkCancel(cid);
+      if (e instanceof SizeError) { try { await LS.downloadCancel(c, cid); } catch { /* */ } dropBlocks(c, cid); throw e; }
+      if (!isTimeout(e) || i >= 2) throw e;   // fewer retries: the storage thread is shared (R-11)
+    }
   }
   for (let i = 1; ; i++) {
     checkCancel(cid);
     try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); diag(`download ${cid.slice(-10)} try ${i}`); const r = await watch<string>(LS.downloadToFile(c, cid, 65536, false, path), measure, "saving", total, onProgress); diag(`download ok (${await fileSize(path)} B)`); return r; }
-    catch (e: any) { diag(`download error: ${e?.message ?? e}`); checkCancel(cid); if (!isTimeout(e) || i >= 5) throw e; }
+    catch (e: any) { diag(`download error: ${e?.message ?? e}`); checkCancel(cid); if (!isTimeout(e) || i >= 3) throw e; }
   }
 }
