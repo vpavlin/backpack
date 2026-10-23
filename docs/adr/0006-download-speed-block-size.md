@@ -72,3 +72,15 @@ So mirrors (people's nodes holding a repo's CIDs) are worth building, together w
   Repro: local nodes and `tc qdisc add dev lo root netem delay 13ms`.
 - An HTTP mirror as a fallback would be safe (every APK is checked against the signed SHA-256 and
   pinned signer), but would step around Storage. Not done.
+
+## Downloads through Loam (2026-10-23, 0.2.10)
+
+With Loam 0.0.58 or later installed and Backpack approved in it, Backpack downloads through Loam's Storage
+service (loam-transport ADR 0020, amended): it asks Loam for the CID, polls the job's progress and copies the
+finished file out of Loam's cache. The job runs in Loam's foreground service, so **a download continues
+when Backpack is closed or killed**, and reopening Backpack picks up the finished file without touching the
+network. Verified on the emulator: Kith (39 MB) started, Backpack force-stopped, Loam finished it, and
+Backpack reopened straight into installing. Without Loam (or with an older one) Backpack uses its own node,
+as before. Backpack's checks (size from the manifest, SHA-256, signer, package and versionCode) are
+unchanged: Loam only moves bytes.
+

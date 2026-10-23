@@ -2,6 +2,7 @@
 // Scala's LogosStorage, shipped in native/logosstorage), and getFile(cid → path) on top of it.
 // Adapted from scala-sdk logos-storage.ts.
 import { NativeModules } from "react-native";
+import * as loam from "./lib/loam-transport-pkg/src/loam-storage";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const NATIVE: any = (NativeModules as any).LogosStorage;
@@ -151,6 +152,7 @@ export const isCancelled = (e: unknown) => String((e as any)?.message ?? e) === 
 export async function cancel(cid: string): Promise<void> {
   cancelled.add(cid);
   diag(`cancel ${cid.slice(-10)}`);
+  if (viaLoam.has(cid)) { try { await loam.cancel(cid); } catch { /* */ } }
   if (ctx) { try { await LS.downloadCancel(ctx, cid); } catch (e: any) { diag(`cancel: ${e?.message ?? e}`); } }
 }
 function checkCancel(cid: string) { if (cancelled.has(cid)) throw new Error(CANCELLED); }
@@ -161,6 +163,12 @@ async function dropBlocks(c: string, cid: string) { try { await LS.delete(c, cid
 export interface SizeRule { exact?: number; max?: number }
 
 export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void, total = 0, onProgress?: (p: Progress) => void, size: SizeRule = {}): Promise<string> {
+  // Through Loam when it has Storage (loam-transport ADR 0020): Loam fetches in the background, so the
+  // download survives this app being closed, and one cache serves every app. Else our own node.
+  if (await loamAvailable()) {
+    try { return await getViaLoam(cid, path, peers, onStage, onProgress, size); }
+    finally { viaLoam.delete(cid); }
+  }
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));
   try { const r = await getFileOn(c, cid, path, peers, onStage, total, onProgress, size); cancelled.delete(cid); return r; }
   catch (e) {
@@ -205,4 +213,51 @@ async function getFileOn(c: string, cid: string, path: string, peers: Peer[], on
     try { onStage?.(i === 1 ? "writing" : `writing (try ${i})`); diag(`download ${cid.slice(-10)} try ${i}`); const r = await watch<string>(LS.downloadToFile(c, cid, 65536, false, path), measure, "saving", total, onProgress); diag(`download ok (${await fileSize(path)} B)`); return r; }
     catch (e: any) { diag(`download error: ${e?.message ?? e}`); checkCancel(cid); if (!isTimeout(e) || i >= 3) throw e; }
   }
+}
+
+// ── Logos Storage through Loam ───────────────────────────────────────────────────────────────────
+const viaLoam = new Set<string>();
+let loamChecked = 0, loamOk = false;
+/** Re-checked at most every 30 s: Loam may be installed, approved or updated while we run. */
+async function loamAvailable(): Promise<boolean> {
+  if (Date.now() - loamChecked < 30_000) return loamOk;
+  loamChecked = Date.now();
+  try { loamOk = await loam.available(); } catch { loamOk = false; }
+  diag(`storage via Loam: ${loamOk ? "yes" : "no (own node)"}`);
+  return loamOk;
+}
+
+async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s: string) => void) | undefined,
+                          onProgress: ((p: Progress) => void) | undefined, size: SizeRule): Promise<string> {
+  viaLoam.add(cid);
+  onStage?.("fetching");
+  let st = await loam.fetch(cid, peers.slice(0, 8));
+  if (!st) throw new Error("Loam didn't answer");
+  diag(`loam job ${cid.slice(-10)}: ${st.state}`);
+  let last = 0, lastT = Date.now(), rate = 0, checkedSize = false;
+  while (st && (st.state === "queued" || st.state === "fetching")) {
+    checkCancel(cid);
+    // the size comes from the manifest (Loam reads it before any data block): check it as soon as known
+    if (!checkedSize && (st.total ?? 0) > 0) {
+      checkedSize = true;
+      try { checkSize(`"datasetSize":${st.total}`, size); }
+      catch (e) { await loam.cancel(cid); throw e; }
+    }
+    const b = st.bytes ?? 0, t = Date.now();
+    rate = 0.7 * rate + 0.3 * ((b - last) * 1000 / Math.max(1, t - lastT)); last = b; lastT = t;
+    onProgress?.({ phase: "downloading", bytes: b, total: st.total ?? 0, rate: Math.max(0, rate) });
+    await new Promise((r) => setTimeout(r, 1000));
+    st = await loam.status(cid);
+  }
+  checkCancel(cid);
+  if (!st || st.state !== "done") {
+    if (st?.state === "cancelled") throw new Error(CANCELLED);
+    throw new Error(`Loam: ${st?.error ?? st?.state ?? "no answer"}`);
+  }
+  checkSize(`"datasetSize":${st.total ?? st.bytes ?? 0}`, size);
+  onStage?.("writing");
+  const n = await loam.saveTo(cid, path);
+  diag(`loam ${cid.slice(-10)}: ${n} bytes`);
+  // return the content when small (the index), like the embedded path
+  return n > 0 && n <= (1 << 20) ? String(await LS.readFileUtf8(path)) : "";
 }

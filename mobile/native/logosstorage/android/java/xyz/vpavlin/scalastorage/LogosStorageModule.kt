@@ -203,6 +203,15 @@ class LogosStorageModule(reactContext: ReactApplicationContext) : ReactContextBa
 
   // Binary-safe file IO for attachments: downloaded blobs are SEALED bytes (not UTF-8), so read them
   // as base64, decrypt in JS with the calendar key, then write the plaintext back as base64.
+  // A small text file (≤ 1 MiB: an index) as UTF-8; "" when larger or missing.
+  @ReactMethod
+  fun readFileUtf8(path: String, promise: Promise) {
+    Thread {
+      try { val f = java.io.File(path); promise.resolve(if (f.isFile && f.length() <= (1L shl 20)) f.readText(Charsets.UTF_8) else "") }
+      catch (t: Throwable) { promise.resolve("") }
+    }.start()
+  }
+
   @ReactMethod
   fun readFileB64(path: String, promise: Promise) {
     Thread {
