@@ -9,6 +9,7 @@ import { openEnvelope } from "./envelope";
 export { openEnvelope };
 import { NativeModules } from "react-native";
 import * as storage from "./storage";
+import * as delivery from "./delivery";
 
 const Installer: any = (NativeModules as any).BackpackInstaller;
 
@@ -43,7 +44,8 @@ export async function saveRepos(r: Repo[]) { await AsyncStorage.setItem(KEY, JSO
 
 /** Ask every pointer source; return the valid pointer with the highest seq (or null). Bad sources are skipped. */
 export async function newestPointer(repo: Repo): Promise<Pointer | null> {
-  let best: Pointer | null = null;
+  // over Logos Delivery (ADR 0007), already verified when it arrived
+  let best: Pointer | null = delivery.pointerFor(repo.key) ?? null;
   for (const url of uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])])) {
     try {
       const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 15000);

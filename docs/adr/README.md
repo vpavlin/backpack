@@ -8,5 +8,5 @@
 | [0004](0004-fdroid-import.md) | Import an F-Droid repo only after verifying its signed index | accepted |
 | [0005](0005-phone-libstorage.md) | The phone's libstorage: fresh build, PR #1540 download fix | accepted |
 | [0006](0006-download-speed-block-size.md) | Download speed: 512 KiB blocks, and a progress bar | accepted |
-| [0007](0007-decentralising-the-pointer.md) | Decentralising the pointer: Delivery now, a chain later | proposed |
+| [0007](0007-decentralising-the-pointer.md) | Decentralising the pointer: Delivery now, a chain later | accepted |
 | [0008](0008-automatic-updates.md) | Automatic updates, app details, uninstall | accepted |

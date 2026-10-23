@@ -1,0 +1,6 @@
+[Unit]
+Description=Re-announce Backpack repo pointers over Logos Delivery (keeps them in Store)
+After=scala-hub3.service
+[Service]
+Type=oneshot
+ExecStart=/root/backpack-pointer/send.sh

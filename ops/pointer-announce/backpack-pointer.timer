@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily re-announce of Backpack repo pointers
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=12h
+RandomizedDelaySec=10min
+[Install]
+WantedBy=timers.target

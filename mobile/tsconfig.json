@@ -1,1 +1,1 @@
-{ "extends": "expo/tsconfig.base", "compilerOptions": { "strict": true }, "exclude": ["test", "node_modules", "android"] }
+{ "extends": "expo/tsconfig.base", "compilerOptions": { "strict": true }, "exclude": ["test", "node_modules", "android", "src/lib/loam-transport-pkg/examples", "src/lib/loam-transport-pkg/test", "src/lib/loam-transport-pkg/tools", "src/lib/loam-transport-pkg/basecamp"] }

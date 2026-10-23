@@ -1,6 +1,6 @@
 # 0007. Decentralising the pointer: Delivery now, a chain later
 
-**Status:** proposed (2026-10-23)
+**Status:** accepted, implemented (2026-10-23)
 
 ## Context
 
@@ -50,3 +50,20 @@ the highest valid `seq` from all of them.
   traffic study).
 - The `u=` link parameter stays for HTTP sources; the Delivery topic is derived from `k=`, so links
   need no change.
+
+## Implementation (2026-10-23)
+
+- **Publish:** `ops/pointer-announce/send.sh` on the VPS sends the pointer file through the scala hub's
+  `delivery_module.send` (logos.test, cluster 2, same network as the phones). The CLI runs it after
+  every `publish` (an `exec:` pointer target); a systemd timer re-sends all pointers every 12 hours.
+- **Verified:** a fleet Store query (us-central and hongkong store nodes) returned the message, and it
+  opened as a valid pointer with the repo key (seq 4).
+- **Phone (0.2.3):** `mobile/src/delivery.ts`, loam-transport as a client of the Loam app's shared node
+  (`preferServiceBackend` before `start`). It listens on every repo's topic and pulls Store on start; a
+  pointer that opens with the repo key and has a higher `seq` triggers a refresh and then automatic
+  updates. Without Loam, start fails quietly and the HTTPS sources carry on.
+- **Not testable on the emulator:** the Loam app's node needs arm64 (`librln.so`), so the receive path is
+  verified on a phone only.
+- Gotcha: `logosctl call … b64:<…>` does NOT decode base64 for a `bstr` argument; it sends the literal
+  text. Pass the JSON with `str:`.
+

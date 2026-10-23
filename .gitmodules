@@ -1,0 +1,3 @@
+[submodule "mobile/src/lib/loam-transport-pkg"]
+	path = mobile/src/lib/loam-transport-pkg
+	url = https://github.com/vpavlin/loam-transport.git

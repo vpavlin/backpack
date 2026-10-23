@@ -7,6 +7,7 @@ import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
 import * as R from "./src/repo";
 import * as storage from "./src/storage";
+import * as delivery from "./src/delivery";
 
 const C = { bg: "#14161a", card: "#1d2026", line: "#2a2e36", text: "#e8e6e3", dim: "#9aa0a8", accent: "#e0a458", ok: "#7fbf7f", err: "#e07a6a" };
 const mb = (n: number) => `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
@@ -29,6 +30,12 @@ function Main() {
   const [updating, setUpdating] = useState<string | null>(null);  // "Updating Kith (1 of 2)…"
   const updatingRef = useRef(false);
   const lastRefresh = useRef(0);
+  // Live pointers over Logos Delivery (ADR 0007): a newer seq than we hold → refresh (and auto-update).
+  const listen = (rs: R.Repo[]) => delivery.watch(rs.map((r) => r.key), async (p) => {
+    const have = (await R.loadRepos()).find((r) => r.key === p.key)?.seq ?? 0;
+    if (p.seq > have && !updatingRef.current) refreshRef.current?.();
+  });
+  const refreshRef = useRef<(() => void) | null>(null);
   const [diagTick, setDiagTick] = useState(0);
   const [nodeLine, setNodeLine] = useState("");
   useEffect(() => storage.onDiag(() => setDiagTick((t) => t + 1)), []);
@@ -59,7 +66,7 @@ function Main() {
     setBusy("Adding repository…");
     try {
       const rs = await R.addFromLink(l, await R.loadRepos(), (s) => setBusy(`Index: ${s}…`));
-      setRepos(rs); setAdding(false); setLink("");
+      setRepos(rs); setAdding(false); setLink(""); listen(rs);
       scanInstalled(rs); loadIcons(rs);
     } catch (e: any) { Alert.alert("Couldn't add the repository", String(e?.message ?? e)); }
     finally { setBusy(null); }
@@ -73,9 +80,11 @@ function Main() {
       catch (e: any) { out.push({ ...r, error: String(e?.message ?? e) }); }
     }
     await R.saveRepos(out); setRepos(out); setBusy(null); lastRefresh.current = Date.now();
+    listen(out);
     loadIcons(out);
     autoUpdate(out, await scanInstalled(out));
   }, [scanInstalled, loadIcons]);   // eslint-disable-line react-hooks/exhaustive-deps
+  refreshRef.current = refreshAll;
 
   // first load + backpack:// links (opened from a message, a QR scan, a browser)
   useEffect(() => {

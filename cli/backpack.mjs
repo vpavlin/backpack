@@ -3,7 +3,7 @@
 // Design and security model: docs/adr/ (0001 repo = key, 0002 security, 0003 updates, 0004 F-Droid import).
 //
 //   backpack init --name "My backpack" [--node http://[…]:8480]
-//   backpack config [--node URL] [--pointer-get URL]… [--pointer-put rsync:host:/path|put:URL]… [--clear-pointers]
+//   backpack config [--node URL] [--pointer-get URL]… [--pointer-put rsync:host:/path|put:URL|exec:CMD]… [--clear-pointers]
 //   backpack add <file.apk>… [--name N --summary S --description D --license L]
 //   backpack import-fdroid <repo URL> --fingerprint <sha256> [--versions 1] [--only pkg,pkg]
 //   backpack publish                  sign + upload the index, sign + push the pointer, print the link
@@ -171,7 +171,7 @@ async function config() {
   const node = opt("node", null); if (node) s.node = node;
   for (const g of optAll("pointer-get")) if (!s.pointers.get.includes(g)) s.pointers.get.push(g);
   for (const p of optAll("pointer-put")) {
-    if (!/^(rsync|put):/.test(p)) die(`--pointer-put must be rsync:<dest> or put:<url>, got ${p}`);
+    if (!/^(rsync|put|exec):/.test(p)) die(`--pointer-put must be rsync:<dest>, put:<url> or exec:<command>, got ${p}`);
     if (!s.pointers.put.includes(p)) s.pointers.put.push(p);
   }
   save(s);
@@ -269,6 +269,8 @@ async function publish() {
   for (const target of s.pointers.put) {
     try {
       if (target.startsWith("rsync:")) execFileSync("rsync", ["-q", "--chmod=F644", pointerFile, target.slice(6)], { stdio: "inherit" });
+      // exec: any command, e.g. announcing over Logos Delivery (ADR 0007); gets the key and the file
+      else if (target.startsWith("exec:")) execFileSync("sh", ["-c", target.slice(5)], { stdio: "inherit", env: { ...process.env, BACKPACK_KEY: pubOf(), BACKPACK_POINTER: pointerFile } });
       else { const pr = await fetch(target.slice(4), { method: "PUT", body: fs.readFileSync(pointerFile) }); if (!pr.ok) throw new Error(`HTTP ${pr.status}`); }
       console.log(`pointer → ${target}`);
     } catch (e) { console.error(`pointer push to ${target} FAILED: ${e.message}`); }
@@ -363,7 +365,7 @@ const run = { init, config, add, "import-fdroid": importFdroid, publish, verify:
 if (!run) {
   console.log(`usage: backpack [--repo NAME] <command>
   init --name N [--node URL]
-  config [--node URL] [--pointer-get URL]… [--pointer-put rsync:dest|put:URL]… [--clear-pointers]
+  config [--node URL] [--pointer-get URL]… [--pointer-put rsync:dest|put:URL|exec:CMD]… [--clear-pointers]
   add APK… [--name --summary --description --license]
   import-fdroid <repo URL> --fingerprint SHA256 [--versions N] [--only pkg,pkg]
   publish
