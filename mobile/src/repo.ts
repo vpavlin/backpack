@@ -12,8 +12,8 @@ import * as storage from "./storage";
 
 const Installer: any = (NativeModules as any).BackpackInstaller;
 
-export interface Version { versionCode: number; versionName: string; size: number; sha256: string; signer?: string; cid: string; minSdk: number; abis: string[] }
-export interface App { id: string; label: string; summary?: string; description?: string; license?: string; icon: string | null; versions: Version[] }
+export interface Version { versionCode: number; versionName: string; size: number; sha256: string; signer?: string; cid: string; minSdk: number; abis: string[]; added?: string; blockSize?: number }
+export interface App { id: string; label: string; summary?: string; description?: string; license?: string; source?: string; icon: string | null; versions: Version[] }
 export interface Index { v: number; name: string; key: string; seq?: number; created: string; nodes: storage.Peer[]; pointers?: string[]; apps: App[] }
 export interface Pointer { key: string; seq: number; index: string; created: string; nodes?: storage.Peer[] }
 export interface Repo {
@@ -119,7 +119,38 @@ export const installer = {
   openSettings: (): Promise<boolean> => Installer.openInstallSettings(),
   installedVersion: async (pkg: string): Promise<number> => Number(await Installer.installedVersion(pkg)),
   launch: (pkg: string): Promise<boolean> => Installer.launch(pkg),
+  uninstall: (pkg: string): Promise<boolean> => Installer.uninstall(pkg),
+  installerOf: (pkg: string): Promise<string> => Installer.installerOf(pkg),
+  installedSigners: async (pkg: string): Promise<string[]> => JSON.parse(await Installer.installedSigners(pkg)),
 };
+
+export interface Update { repo: Repo; app: App; v: Version; from: number }
+
+/**
+ * Updates available for installed apps: across all repos, the newest version of each installed
+ * package that is signed by a key the installed app already has (anything else Android would refuse,
+ * so it is not offered as an update). Same package in several repos: the highest versionCode wins.
+ */
+export async function pendingUpdates(repos: Repo[], installed: Record<string, number>): Promise<Update[]> {
+  const best = new Map<string, Update>();
+  for (const repo of repos) for (const app of repo.index?.apps ?? []) {
+    const have = installed[app.id] ?? -1, v = app.versions[0];
+    if (have < 0 || !v || v.versionCode <= have || !v.signer) continue;
+    const prev = best.get(app.id);
+    if (prev && prev.v.versionCode >= v.versionCode) continue;
+    if (!(await installer.installedSigners(app.id)).includes(v.signer)) continue;
+    best.set(app.id, { repo, app, v, from: have });
+  }
+  return [...best.values()];
+}
+
+/** Every repo that lists `pkg`, with the signer of its newest version: lets the app warn when two
+ *  repos publish the same package under different keys (only one of them can be the real one). */
+export function publishersOf(repos: Repo[], pkg: string): { repo: Repo; signer?: string; versionName: string }[] {
+  const out: { repo: Repo; signer?: string; versionName: string }[] = [];
+  for (const repo of repos) { const a = repo.index?.apps.find((x) => x.id === pkg); if (a?.versions[0]) out.push({ repo, signer: a.versions[0].signer, versionName: a.versions[0].versionName }); }
+  return out;
+}
 
 /**
  * Fetch an APK by CID and refuse it unless: its SHA-256 is the signed index's; its signing

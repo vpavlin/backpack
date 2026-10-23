@@ -55,9 +55,9 @@ const openEnvelope = open;
 // ── Storage node REST ────────────────────────────────────────────────────────
 // Storage's block exchange pays roughly a round trip per block, so a far node delivers ~60-120 KB/s with
 // the default 64 KiB blocks; 512 KiB blocks (the maximum) measured 3.4x faster (ADR 0006). Small files
-// (index, icons) keep the default.
+// (the index, icons) keep the default.
 const BIG_BLOCK = 524288;
-const blockSizeFor = (n) => (n > 1 << 20 ? BIG_BLOCK : 65536);
+const blockSizeFor = (n) => (n > 1 << 17 ? BIG_BLOCK : 65536);   // > 128 KiB: every APK
 async function upload(node, file, name, mime) {
   const body = fs.readFileSync(file);
   const q = blockSizeFor(body.length) === BIG_BLOCK ? `?blockSize=${BIG_BLOCK}` : "";
@@ -339,7 +339,7 @@ async function verifyCmd() {
 async function rehost() {
   const s = load(); let n = 0;
   for (const a of Object.values(s.apps)) for (const v of a.versions) {
-    if (v.blockSize) continue;  // uploaded with the sizes above already
+    if (v.blockSize === blockSizeFor(v.size)) continue;  // already uploaded with the right block size
     process.stdout.write(`${a.id} ${v.versionName} (${(v.size / 1e6).toFixed(1)} MB) → `);
     const bytes = await download(s.node, v.cid);
     if (sha256hex(bytes) !== v.sha256) die(`${a.id} ${v.versionName}: the node's copy doesn't match the pinned SHA-256`);

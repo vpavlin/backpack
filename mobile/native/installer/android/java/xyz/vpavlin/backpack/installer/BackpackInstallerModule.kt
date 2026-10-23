@@ -117,6 +117,28 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
     catch (t: Throwable) { promise.resolve("[]") }   // not installed
   }
 
+  // Ask Android to uninstall a package: it shows its own confirmation. Resolves once the dialog is
+  // started; the app rescans installed versions when it comes back to the foreground.
+  @ReactMethod
+  fun uninstall(pkg: String, promise: Promise) {
+    try {
+      @Suppress("DEPRECATION")
+      val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      rc.startActivity(i); promise.resolve(true)
+    } catch (t: Throwable) { promise.reject("uninstall", t.message ?: "failed") }
+  }
+
+  // Which app installed a package ("" if unknown or not installed). When it is Backpack itself,
+  // Android 12+ lets Backpack update it without asking (setRequireUserAction in install()).
+  @ReactMethod
+  fun installerOf(pkg: String, promise: Promise) {
+    try {
+      val name = if (Build.VERSION.SDK_INT >= 30) rc.packageManager.getInstallSourceInfo(pkg).installingPackageName
+        else @Suppress("DEPRECATION") rc.packageManager.getInstallerPackageName(pkg)
+      promise.resolve(name ?: "")
+    } catch (t: Throwable) { promise.resolve("") }
+  }
+
   // Recursive delete (Backpack's Storage data dir is a cache, wiped at every launch).
   @ReactMethod
   fun deleteTree(path: String, promise: Promise) {
