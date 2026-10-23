@@ -5,6 +5,7 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Clipboard from "expo-clipboard";
 import * as Linking from "expo-linking";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as R from "./src/repo";
 import * as storage from "./src/storage";
 import * as delivery from "./src/delivery";
@@ -46,6 +47,10 @@ function Main() {
   const [stage, setStage] = useState<Record<string, string>>({}); // app id → install stage
   const [prog, setProg] = useState<Record<string, storage.Progress>>({}); // app id → download progress
   const [icons, setIcons] = useState<Record<string, string>>({});
+  // repos folded to their header line (tap the header); remembered on the device
+  const [folded, setFolded] = useState<Record<string, boolean>>({});
+  useEffect(() => { AsyncStorage.getItem("backpack.folded").then((v) => v && setFolded(JSON.parse(v))).catch(() => {}); }, []);
+  const toggleFold = (key: string) => setFolded((m) => { const n = { ...m, [key]: !m[key] }; AsyncStorage.setItem("backpack.folded", JSON.stringify(n)).catch(() => {}); return n; });
   const [showDiag, setShowDiag] = useState(false);
   const [prefs, setPrefs] = useState<settingsStore.Settings>(settingsStore.DEFAULTS);
   const [showSettings, setShowSettings] = useState(false);
@@ -263,9 +268,9 @@ function Main() {
         )}
         {repos.map((r) => (
           <View key={r.key} style={{ marginBottom: 18 }}>
-            <Pressable onLongPress={() => remove(r)} style={s.repoHead}>
-              <Text style={s.repoName}>{r.name}</Text>
-              <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
+            <Pressable onPress={() => toggleFold(r.key)} onLongPress={() => remove(r)} style={s.repoHead}>
+              <Text style={s.repoName}>{folded[r.key] ? "▸ " : "▾ "}{r.name}</Text>
+              <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps${folded[r.key] ? (() => { const n = r.index!.apps.filter((a) => (installed[a.id] ?? -1) >= 0 && (installed[a.id] ?? -1) < (a.versions[0]?.versionCode ?? 0)).length; return n ? ` (${n} update${n > 1 ? "s" : ""})` : ""; })() : ""} · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
               <Text style={s.repoKey}>publisher key {keyShort(r.key)}</Text>
               {!!r.sources?.length && (
                 <Text style={s.repoKey}>
@@ -275,7 +280,7 @@ function Main() {
               )}
             </Pressable>
             {r.error && <Text style={[s.hint, { color: C.err }]}>{r.error}</Text>}
-            {(r.index?.apps ?? []).map((a) => {
+            {(folded[r.key] ? [] : r.index?.apps ?? []).map((a) => {
               const v = a.versions[0]; const have = installed[a.id] ?? -1; const st = stage[a.id];
               const action = have < 0 ? "Install" : have < v.versionCode ? "Update" : "Open";
               return (
