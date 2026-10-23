@@ -45,9 +45,30 @@ All measured on 2026-10-23 with libstorage d82d0d39 (PR #1540), the same build a
 Measured on the emulator after the change: Kith (39 MB) in ~2.5 minutes at 220-335 KB/s, down from
 ~5.5 minutes.
 
+## More nodes serving the same CID
+
+Three seeders vs one, all on one machine with 26 ms round trip (netem), 16 MB random file, three
+runs each, alternating order:
+
+| Blocks | 1 seeder | 3 seeders |
+|---|---|---|
+| 64 KiB | 1.1 MB/s, 423 KB/s, 423 KB/s | 287 KB/s, 158 KB/s, 472 KB/s |
+| 512 KiB | 129 KB/s, 173 KB/s, 256 KB/s | 454 KB/s, **6.0 MB/s, 6.3 MB/s** |
+
+- With 512 KiB blocks, extra seeders help far more than linearly: two of three runs reached the
+  bandwidth of the machine. Each peer is a pipeline with a small depth, so more peers mean more
+  requests in flight.
+- With 64 KiB blocks, more seeders did not help.
+- Runs vary a lot (one case ranged from 129 KB/s to 1.1 MB/s), so this is a direction, not a number.
+  Real seeders have different round-trip times.
+
+So mirrors (people's nodes holding a repo's CIDs) are worth building, together with large blocks.
+
 ## Still open
 
-- Report upstream (logos-storage-nim): block exchange is round-trip bound; reproduce with two local
-  nodes and `tc qdisc add dev lo root netem delay 13ms`.
+- Upstream (logos-storage-nim, checked 2026-10-23): no open issue or PR on throughput against round-trip
+  time. Nearest: #974 (block exchange performance, closed), #895 (baseline vs BitTorrent, closed),
+  #1556 (provider lookup discards providers, open), PR #1540 (swarms from DHT providers, open).
+  Repro: local nodes and `tc qdisc add dev lo root netem delay 13ms`.
 - An HTTP mirror as a fallback would be safe (every APK is checked against the signed SHA-256 and
   pinned signer), but would step around Storage. Not done.
