@@ -17,6 +17,15 @@
 #include <errno.h>
 #include "libstorage.h"
 
+// The Java class these functions belong to is set at compile time, so the same glue serves Backpack's
+// RN module (default) and the Loam app's storage service (-DJNI_CLASS_PREFIX=Java_xyz_vpavlin_loam_storage_StorageNative_).
+#ifndef JNI_CLASS_PREFIX
+#define JNI_CLASS_PREFIX Java_xyz_vpavlin_scalastorage_LogosStorageModule_
+#endif
+#define JNIFN_(p, n) p##n
+#define JNIFN__(p, n) JNIFN_(p, n)
+#define JNIFN(n) JNIFN__(JNI_CLASS_PREFIX, n)
+
 // The generated Nim entrypoint; must run once before storage_new (sets up the GC + threads).
 extern void libstorageNimMain(void);
 
@@ -138,13 +147,13 @@ static jstring resp_finish(JNIEnv *env, Resp *r) {
 // ── JNI exports (names match xyz.vpavlin.scalastorage.LogosStorageModule external funs) ──
 
 JNIEXPORT void JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageSetup(JNIEnv *env, jobject thiz) {
+JNIFN(storageSetup)(JNIEnv *env, jobject thiz) {
     (void)env; (void)thiz;
     libstorageNimMain();
 }
 
 JNIEXPORT jlong JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageNew(JNIEnv *env, jobject thiz, jstring cfgJson) {
+JNIFN(storageNew)(JNIEnv *env, jobject thiz, jstring cfgJson) {
     (void)thiz;
     const char *cfg = (*env)->GetStringUTFChars(env, cfgJson, NULL);
     if (!cfg) return 0L;
@@ -163,7 +172,7 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageNew(JNIEnv *env, jobject
 }
 
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageVersion(JNIEnv *env, jobject thiz, jlong ctx) {
+JNIFN(storageVersion)(JNIEnv *env, jobject thiz, jlong ctx) {
     (void)thiz;
     char *v = storage_version((void *)(intptr_t)ctx);
     jstring js = (*env)->NewStringUTF(env, v ? v : "");
@@ -182,7 +191,7 @@ static jstring call_finish(JNIEnv *env, Resp *r, int accepted, long timeoutMs) {
 // Generic async-call-with-no-arg wrapper (start/stop/close/spr/debug).
 #define DEFINE_CTX_CALL(NAME, FFI)                                                               \
 JNIEXPORT jstring JNICALL                                                                        \
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_##NAME(JNIEnv *env, jobject thiz, jlong ctx) {  \
+JNIFN(NAME)(JNIEnv *env, jobject thiz, jlong ctx) {  \
     (void)thiz;                                                                                  \
     Resp *r = resp_alloc();                                                                      \
     if (!r) return (*env)->NewStringUTF(env, OOM_JSON);                                          \
@@ -196,7 +205,7 @@ DEFINE_CTX_CALL(storageSpr,   storage_spr)
 DEFINE_CTX_CALL(storageDebug, storage_debug)
 
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDestroy(JNIEnv *env, jobject thiz, jlong ctx) {
+JNIFN(storageDestroy)(JNIEnv *env, jobject thiz, jlong ctx) {
     (void)thiz;
     int ret = storage_destroy((void *)(intptr_t)ctx);  // synchronous
     return (*env)->NewStringUTF(env, ret == RET_OK ? "{\"ok\":true,\"msg\":\"\"}"
@@ -206,7 +215,7 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDestroy(JNIEnv *env, job
 // Generic async-call-with-one-cid wrapper (exists/cancel/delete), with its own timeout.
 #define DEFINE_CID_CALL(NAME, FFI, TIMEOUT)                                                      \
 JNIEXPORT jstring JNICALL                                                                        \
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_##NAME(JNIEnv *env, jobject thiz, jlong ctx,    \
+JNIFN(NAME)(JNIEnv *env, jobject thiz, jlong ctx,    \
                                                         jstring cidStr) {                        \
     (void)thiz;                                                                                  \
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);                              \
@@ -225,7 +234,7 @@ DEFINE_CID_CALL(storageDelete, storage_delete, SHORT_TIMEOUT_MS)
 // fetch (libstorage >= PR #1540): isPrivate=false, advertise=false — a fetch-only client neither
 // hides from nor advertises to the DHT.
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageFetch(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
+JNIFN(storageFetch)(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
     (void)thiz;
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
     if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);
@@ -239,7 +248,7 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageFetch(JNIEnv *env, jobje
 // Just the manifest (treeCid, datasetSize, …), without fetching any data block: Backpack checks the
 // size before it lets a download start (audit R-5).
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadManifest(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
+JNIFN(storageDownloadManifest)(JNIEnv *env, jobject thiz, jlong ctx, jstring cidStr) {
     (void)thiz;
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
     if (!cid) return (*env)->NewStringUTF(env, OOM_JSON);
@@ -251,7 +260,7 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadManifest(JNIEnv 
 }
 
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadInit(JNIEnv *env, jobject thiz,
+JNIFN(storageDownloadInit)(JNIEnv *env, jobject thiz,
         jlong ctx, jstring cidStr, jlong chunkSize, jboolean local) {
     (void)thiz;
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
@@ -267,7 +276,7 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadInit(JNIEnv *env
 
 // Download a CID straight to a file on disk — the BlobBackend.get path (JS then reads the file).
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadStream(JNIEnv *env, jobject thiz,
+JNIFN(storageDownloadStream)(JNIEnv *env, jobject thiz,
         jlong ctx, jstring cidStr, jlong chunkSize, jboolean local, jstring filePathStr) {
     (void)thiz; (void)local;   // >= PR #1540: the session made by download_init carries local/private
     const char *cid = (*env)->GetStringUTFChars(env, cidStr, NULL);
@@ -290,7 +299,7 @@ Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageDownloadStream(JNIEnv *e
 // a 30 s wait (audit BP-12/16).
 #define MAX_ADDRS 8
 JNIEXPORT jstring JNICALL
-Java_xyz_vpavlin_scalastorage_LogosStorageModule_storageConnect(JNIEnv *env, jobject thiz,
+JNIFN(storageConnect)(JNIEnv *env, jobject thiz,
         jlong ctx, jstring peerIdStr, jobjectArray addrs) {
     (void)thiz;
     const char *peerId = (*env)->GetStringUTFChars(env, peerIdStr, NULL);
