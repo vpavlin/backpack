@@ -69,6 +69,9 @@ function Main() {
     if (p.seq > have && !updatingRef.current) refreshRef.current?.();
   });
   const refreshRef = useRef<(() => void) | null>(null);
+  const refreshing = useRef(false);
+  const again = useRef(false);
+  const retry = useRef<{ timer: ReturnType<typeof setTimeout> | null; n: number }>({ timer: null, n: 0 });
   const [diagTick, setDiagTick] = useState(0);
   const [nodeLine, setNodeLine] = useState("");
   useEffect(() => storage.onDiag(() => setDiagTick((t) => t + 1)), []);
@@ -119,20 +122,46 @@ function Main() {
   }, [scanInstalled, loadIcons]);
 
   const refreshAll = useCallback(async () => {
-    setBusy("Asking Logos Delivery…");
-    const rsNow = await R.loadRepos();
-    await delivery.pullAndWait(rsNow.map((r) => r.key));   // Store first: the note usually comes from there
-    setBusy("Refreshing…");
-    const out: R.Repo[] = [];
-    for (const r of await R.loadRepos()) {
-      try { out.push(await R.refresh(r, (s) => setBusy(`${r.name}: ${s}…`))); }
-      catch (e: any) { out.push({ ...r, error: String(e?.message ?? e) }); }
+    // one at a time: two overlapping runs each save their own copy of the list, and the slower one
+    // wrote back the older state (seen on the emulator: header #2 while #3 was installing)
+    // A request that comes in meanwhile (a new note, a pull) runs once more right after.
+    if (refreshing.current) { again.current = true; return; }
+    refreshing.current = true;
+    try {
+      setBusy("Asking Logos Delivery…");
+      const rsNow = await R.loadRepos();
+      await delivery.pullAndWait(rsNow.map((r) => r.key));   // Store first: the note usually comes from there
+      setBusy("Refreshing…");
+      const out: R.Repo[] = [];
+      for (const r of await R.loadRepos()) {
+        try { out.push(await R.refresh(r, (s) => setBusy(`${r.name}: ${s}…`))); }
+        catch (e: any) { out.push({ ...r, error: String(e?.message ?? e) }); }
+      }
+      await R.saveRepos(out); setRepos(out); setBusy(null); lastRefresh.current = Date.now();
+      scheduleRetry(out);
+      listen(out);
+      loadIcons(out);
+      autoUpdate(out, await scanInstalled(out));
+    } finally {
+      refreshing.current = false; setBusy(null);
+      if (again.current) { again.current = false; setTimeout(() => refreshRef.current?.(), 0); }
     }
-    await R.saveRepos(out); setRepos(out); setBusy(null); lastRefresh.current = Date.now();
-    listen(out);
-    loadIcons(out);
-    autoUpdate(out, await scanInstalled(out));
   }, [scanInstalled, loadIcons]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // A source says there's a newer list than the one we hold, but fetching it failed (a network change
+  // mid-download, Loam restarted…): try again by itself, backing off, while Backpack is open. The note
+  // that told us is saved (delivery.ts), so it isn't needed a second time.
+  const scheduleRetry = (rs: R.Repo[]) => {
+    if (retry.current.timer) clearTimeout(retry.current.timer);
+    retry.current.timer = null;
+    const behind = rs.filter((r) => Math.max(0, ...(r.sources ?? []).map((x) => x.seq ?? 0)) > (r.seq ?? 0));
+    if (!behind.length) { retry.current.n = 0; return; }
+    const delay = RETRY_S[Math.min(retry.current.n++, RETRY_S.length - 1)] * 1000;
+    storage.diag(`newer list not fetched yet (${behind.map((r) => r.name).join(", ")}): trying again in ${delay / 1000} s`);
+    retry.current.timer = setTimeout(() => {
+      retry.current.timer = null;
+      if (AppState.currentState === "active" && !updatingRef.current && !refreshing.current) refreshRef.current?.();
+    }, delay);
+  };
   refreshRef.current = refreshAll;
 
   // first load + backpack:// links (opened from a message, a QR scan, a browser)
@@ -157,7 +186,9 @@ function Main() {
         const waiting = await R.installer.awaitingInstalls();
         if (waiting.length) setStage((m) => { const n = { ...m }; for (const pkg of waiting) if (n[pkg]) n[pkg] = AWAITING; return n; });
       }, 1500);
-      if (Date.now() - lastRefresh.current > 15 * 60_000 && !updatingRef.current) refreshAll();
+      // (or sooner when a newer list is known but not fetched yet: a retry is due)
+      const due = retry.current.n > 0 && !retry.current.timer;
+      if ((due || Date.now() - lastRefresh.current > 15 * 60_000) && !updatingRef.current && !refreshing.current) refreshAll();
       else R.loadRepos().then(scanInstalled);
     });
     return () => { sub.remove(); st.remove(); };
@@ -353,6 +384,8 @@ function SettingsScreen({ prefs, onChange, onClose }: { prefs: settingsStore.Set
 }
 
 const AWAITING = "waiting for you to confirm the install";
+const RETRY_S = [30, 60, 120, 300, 600];   // retry a newer list we couldn't fetch: 30 s, 1, 2, 5, then every 10 min
+const cidShort = (c?: string) => (c ? `${c.slice(0, 10)}…${c.slice(-6)}` : "—");
 const keyShort = (k: string) => `${k.slice(0, 6)}…${k.slice(-4)}`;
 const certShort = (h?: string) => (h ? `${h.slice(0, 8)}…${h.slice(-8)}` : "not pinned");
 
@@ -413,6 +446,13 @@ function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInsta
               : `Also in "${o.repo.name}" (${o.versionName}), same signing key.`}
           </Text>
         ))}
+
+        <Text style={s.section}>From Logos Storage</Text>
+        <Text style={s.kv}>App list (index)  <Text style={s.kvV}>{cidShort(repo.loadedCid ?? repo.indexCid)}</Text></Text>
+        <Text style={s.kv}>Icon  <Text style={s.kvV}>{app.icon ? cidShort(app.icon) : "none"}</Text></Text>
+        <Text style={s.kv}>APK  <Text style={s.kvV}>{cidShort(v.cid)}</Text></Text>
+        <Text style={[s.kv, { fontSize: 11 }]}>Content IDs: each file is fetched by its hash from Logos Storage nodes{" "}
+          (through the Loam app when it runs Storage), then checked against the signed list.</Text>
 
         <Text style={s.section}>Details</Text>
         {!!app.license && app.license !== "Unknown" && <Text style={s.kv}>Licence  <Text style={s.kvV}>{app.license}</Text></Text>}

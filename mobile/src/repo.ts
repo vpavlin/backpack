@@ -76,6 +76,7 @@ export async function saveRepos(r: Repo[]) { await AsyncStorage.setItem(KEY, JSO
 export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null; via?: string; sources: Source[] }> {
   const sources: Source[] = [];
   const cands: { p: Pointer; name: string }[] = [];
+  await delivery.loaded();   // a saved note counts too (one we couldn't follow last time)
   const d = delivery.pointerFor(repo.key), ds = delivery.status();
   if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
   else sources.push({ name: "Delivery", error: ds.state === "on" ? "nothing yet" : ds.state === "unavailable" ? "Loam not available" : "starting" });

@@ -3,6 +3,9 @@
 // Store keeps it). Backpack listens on those topics while open and pulls Store on start; a valid pointer
 // with a higher seq triggers the same refresh as one from an HTTPS source. Nothing here is trusted:
 // every message is opened with the repo's key (openEnvelope) and only the highest seq counts.
+// The newest note per repo is also SAVED (as received, still signed) and checked again on load: a note
+// whose index we failed to fetch (network changed mid-download) is not delivered a second time, so
+// without the saved copy Backpack would forget that a newer list exists and never try again.
 // Without the Loam app, start() fails quietly and the HTTPS sources still work.
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as T from "./lib/loam-transport";
@@ -25,7 +28,7 @@ let state: "off" | "starting" | "on" | "unavailable" = "off";
 let lastError = "";
 const keys = new Set<string>();
 const best = new Map<string, Pointer>();            // repo key → newest valid pointer seen over Delivery
-const via = new Map<string, "live" | "store">();    // how that pointer arrived
+const via = new Map<string, "live" | "store" | "saved">();    // how that pointer arrived
 const heard = new Map<string, number>();            // repo key → when a valid note last arrived (any seq)
 let listeningSince = 0;
 let unavailableAt = 0;                             // a pointer signed before this came from Store, not live
@@ -33,8 +36,29 @@ let onPointer: ((p: Pointer) => void) | null = null;
 
 /** Newest pointer for `key` received over Delivery (live or from Store), if any. */
 export function pointerFor(key: string): Pointer | undefined { return best.get(key); }
-export function arrivedVia(key: string): "live" | "store" | undefined { return via.get(key); }
+export function arrivedVia(key: string): "live" | "store" | "saved" | undefined { return via.get(key); }
 export function status(): { state: typeof state; error: string } { return { state, error: lastError }; }
+
+const SAVED = "backpack.deliveryPointers.v1";      // repo key → the newest note's envelope text
+let saved: Record<string, string> = {};
+let loading: Promise<void> | null = null;
+/** Load the saved notes (once). Each is verified again; a bad or foreign one is dropped. */
+export function loaded(): Promise<void> {
+  return loading ??= (async () => {
+    try { saved = JSON.parse((await AsyncStorage.getItem(SAVED)) ?? "{}") ?? {}; } catch { saved = {}; }
+    for (const [key, text] of Object.entries(saved)) {
+      try {
+        if (typeof text !== "string" || text.length > MAX_BYTES) throw new Error("bad");
+        const p = validatePointer(openEnvelope(JSON.parse(text), key, "pointer"), key);
+        if (!best.has(key) || p.seq > best.get(key)!.seq) { best.set(key, p); via.set(key, "saved"); }
+      } catch { delete saved[key]; }
+    }
+  })();
+}
+function save(key: string, text: string | null) {
+  if (text === null) delete saved[key]; else saved[key] = text;
+  AsyncStorage.setItem(SAVED, JSON.stringify(saved)).catch(() => {});
+}
 
 function receive(topic: string, candidates: Uint8Array[]): boolean {
   const key = [...keys].find((k) => topicFor(k) === topic);
@@ -42,12 +66,13 @@ function receive(topic: string, candidates: Uint8Array[]): boolean {
   for (const c of candidates.slice(0, MAX_CANDIDATES)) {
     if (!c || c.length > MAX_BYTES) continue;
     try {
-      const p = validatePointer(openEnvelope(JSON.parse(new TextDecoder().decode(c)), key, "pointer"), key);
+      const text = new TextDecoder().decode(c);
+      const p = validatePointer(openEnvelope(JSON.parse(text), key, "pointer"), key);
       storage.diag(`delivery: pointer ${key.slice(0, 6)} seq ${p.seq}`);
       heard.set(key, Date.now());
       const prev = best.get(key);
       if (!prev || p.seq > prev.seq) {
-        best.set(key, p); via.set(key, Date.parse(p.created) < listeningSince ? "store" : "live");
+        best.set(key, p); via.set(key, Date.parse(p.created) < listeningSince ? "store" : "live"); save(key, text);
         const now = Date.now();
         if (now - (lastTrigger.get(key) ?? 0) >= MIN_TRIGGER_MS) { lastTrigger.set(key, now); onPointer?.(p); }
         // a newer pointer inside the window is kept (best) and picked up by the next refresh
@@ -61,7 +86,7 @@ function receive(topic: string, candidates: Uint8Array[]): boolean {
 /** Stop caring about removed repos (audit BP-21). The transport has no unsubscribe yet, so the topic
  *  stays joined until restart, but its messages are ignored and nothing is remembered for it. */
 export function unwatch(repoKeys: string[]): void {
-  for (const k of repoKeys) { keys.delete(k); best.delete(k); via.delete(k); heard.delete(k); lastTrigger.delete(k); }
+  for (const k of repoKeys) { keys.delete(k); best.delete(k); via.delete(k); heard.delete(k); lastTrigger.delete(k); save(k, null); }
 }
 
 async function deviceId(): Promise<string> {
@@ -73,6 +98,7 @@ async function deviceId(): Promise<string> {
 /** Listen for the given repos' pointers. Safe to call again with more keys (joins the new topics). */
 export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promise<void> {
   onPointer = cb;
+  await loaded();
   const fresh = repoKeys.filter((k) => !keys.has(k));
   fresh.forEach((k) => keys.add(k));
   if (state === "starting") return;                   // joined right after start() (audit R-9)

@@ -239,6 +239,7 @@ async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s
   if (!st) throw new Error("Loam didn't answer");
   diag(`loam job ${cid.slice(-10)}: ${st.state}`);
   let last = 0, lastT = Date.now(), rate = 0, checkedSize = false, restarts = 0;
+  let seen = "", changedAt = Date.now();   // older Loams have no stall watchdog: give up after 10 min without change
   while (st && (st.state === "queued" || st.state === "fetching")) {
     checkCancel(cid);
     // the size comes from the manifest (Loam reads it before any data block): check it as soon as known
@@ -250,10 +251,20 @@ async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s
     const b = st.bytes ?? 0, t = Date.now();
     rate = 0.7 * rate + 0.3 * ((b - last) * 1000 / Math.max(1, t - lastT)); last = b; lastT = t;
     onProgress?.({ phase: "downloading", bytes: b, total: st.total ?? 0, rate: Math.max(0, rate) });
+    const now = `${st.state}/${b}`;
+    if (now !== seen) { seen = now; changedAt = t; }
+    else if ((st as any).idleMs === undefined && t - changedAt > 600_000) { await loam.cancel(cid); throw new Error("Loam: no progress for 10 min"); }
     await new Promise((r) => setTimeout(r, 1000));
-    st = await loam.status(cid);
-    // "none": Loam forgot the job (cache cleared, file evicted, Loam restarted) — ask again, a few times
-    if (st?.state === "none" && restarts++ < 3) { diag(`loam job ${cid.slice(-10)} gone: fetching again`); st = await loam.fetch(cid, peers.slice(0, 8)); }
+    try { st = await loam.status(cid); } catch { st = null; }
+    // "none": Loam forgot the job (cache cleared, file evicted, Loam restarted); no answer: Loam was
+    // restarted or killed. "failed: stalled": Loam's job got no data for minutes (network changed). Ask
+    // again, a few times.
+    const lost = !st || st.state === "none" || (st.state === "failed" && /^stalled/.test(st.error ?? ""));
+    if (lost && restarts++ < 3) {
+      diag(`loam job ${cid.slice(-10)} ${st ? st.state + (st.error ? ` (${st.error})` : "") : "no answer"}: fetching again`);
+      await new Promise((r) => setTimeout(r, 2000));
+      try { st = await loam.fetch(cid, peers.slice(0, 8)); } catch { st = null; }
+    }
   }
   checkCancel(cid);
   if (!st || st.state !== "done") {
