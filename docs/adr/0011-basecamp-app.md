@@ -45,6 +45,11 @@ One Basecamp app, **Backpack**, in two modules, with two roles in one window.
     its key bundle is published.
 - **Member** (repos I subscribe to): register or renew from the desktop wallet, my devices (each phone's
   member key, added by scanning the QR Backpack on the phone shows), expiry reminders.
+  An optional "register privately" path funds a fresh account from LEZ's shielded pool. laptop/SPEL showed
+  live on v0.2.5 that the shield and deshield legs are public and trivially linkable by amount and timing,
+  so the app must deshield a **standard denomination** (not `price × periods`) and put a **delay or
+  batching** between shielding and deshielding; an immediate same-amount hop is false privacy (ADR 0010,
+  "Funding privacy — what v0.2.5 actually provides").
 
 ### Where things live
 
