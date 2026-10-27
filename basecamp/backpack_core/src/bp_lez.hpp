@@ -4,6 +4,7 @@
 // only a repo set to use LEZ needs it. Read-only here: list the registry, read each membership.
 #include "bp_crypto.hpp"
 #include <dlfcn.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <cstring>
 
@@ -22,10 +23,19 @@ struct LezFfi {
     char* (*getOne)(const void*, const char*) = nullptr;
     char* (*balance)(const void*) = nullptr;
     void (*freeStr)(char*) = nullptr;
-    // lib: an explicit path, else $BACKPACK_LEZ_LIB, else the loader's search path
+    // The copy shipped in the module package, next to this plugin's .so ("" if there is none)
+    static std::string bundled() {
+        Dl_info di{};
+        if (!dladdr((void*)&LezFfi::bundled, &di) || !di.dli_fname) return "";
+        std::string d(di.dli_fname); size_t s = d.rfind('/'); if (s == std::string::npos) return "";
+        std::string p = d.substr(0, s) + "/libbackpack_access_ffi.so";
+        return access(p.c_str(), R_OK) == 0 ? p : "";
+    }
+    // lib: an explicit path, else $BACKPACK_LEZ_LIB, else the bundled copy, else the loader's search path
     static LezFfi& get(const std::string& lib) {
         static LezFfi f; static std::string loaded;
-        std::string p = !lib.empty() ? lib : std::getenv("BACKPACK_LEZ_LIB") ? std::getenv("BACKPACK_LEZ_LIB") : "libbackpack_access_ffi.so";
+        std::string p = !lib.empty() ? lib : std::getenv("BACKPACK_LEZ_LIB") ? std::getenv("BACKPACK_LEZ_LIB") : bundled();
+        if (p.empty()) p = "libbackpack_access_ffi.so";
         if (f.h && loaded == p) return f;
         void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!h) { const char* e = dlerror(); throw Err(std::string("can't load the LEZ membership library (") + p + "): " + (e ? e : "?")); }

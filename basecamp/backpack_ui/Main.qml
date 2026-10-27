@@ -97,6 +97,10 @@ Item {
     Component.onCompleted: root.refresh()
 
     // ── helpers
+    // A members repo hands out its key only through the update note: with no web address phones read, or
+    // nowhere publish sends it, no phone can ever get in (the link carries no key)
+    function noteMissing() { return !!(root.cur && root.cur.members && (!root.cur.pointersGet.length || !root.cur.pointersPut.length)) }
+    readonly property string noteMissingText: "No phone can read this repo yet: phones get their key from the update note, and " + (root.cur && !root.cur.pointersGet.length ? "it has no web address (Settings)." : "publish sends it nowhere (backpack config --pointer-put).")
     function lezActive(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i].paidThroughMs > Date.now()) n++; return n }
     function keyShort(k) { return k ? k.slice(0, 6) + "…" + k.slice(-4) : "" }
     function mb(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " kB" }
@@ -193,6 +197,7 @@ Item {
                         Sub { text: root.cur ? ("#" + root.cur.seq + " · publisher key " + root.keyShort(root.cur.key) + " · Storage node " + (root.cur.node || "not set")) : ""; Layout.fillWidth: true }
                         Sub { visible: !!(root.cur && root.cur.nodeWarning); color: root.cWarn; Layout.fillWidth: true
                               text: root.cur ? (root.cur.node ? "The Storage node is " + root.cur.nodeWarning + ": phones outside that network can't fetch this repo." : "Set a Storage node in Settings before publishing.") : "" }
+                        Sub { visible: root.noteMissing(); color: root.cBad; Layout.fillWidth: true; text: root.noteMissingText }
                         Sub { text: root.cur ? ("Update note: " + (root.cur.pointersGet.length ? root.cur.pointersGet.join(", ") : "no web address") + (root.cur.pointersPut.length ? " · sent via " + root.cur.pointersPut.join(", ") : " · not sent anywhere")) : ""; Layout.fillWidth: true }
                     }
                 }
@@ -417,6 +422,7 @@ Item {
             width: parent.width; spacing: 10
             T { text: "Members"; font.bold: true; font.pixelSize: 17 }
             Sub { Layout.fillWidth: true; text: "Each device here gets the read key, wrapped for it alone, at the next publish. The key changes every hour and whenever you remove a device, so a removed device can't read new versions (what it already has stays its own)." }
+            Sub { visible: root.noteMissing(); color: root.cBad; Layout.fillWidth: true; text: root.noteMissingText }
             ListView {
                 Layout.fillWidth: true; Layout.preferredHeight: Math.min(contentHeight, 280); clip: true; spacing: 6
                 model: root.cur && root.cur.memberDevices ? root.cur.memberDevices : []
