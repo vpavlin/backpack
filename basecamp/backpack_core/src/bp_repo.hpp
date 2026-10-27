@@ -95,6 +95,17 @@ inline ojson without(const ojson& o, std::initializer_list<const char*> keys) {
     for (auto& [k, v] : o.items()) { bool drop = false; for (auto x : keys) if (k == x) drop = true; if (!drop) n[k] = v; }
     return n;
 }
+// A Java package name: letters/digits/_ segments, each starting with a letter, at least two (BP-7).
+inline bool validPackage(const std::string& p) {
+    if (p.empty() || p.size() > 200) return false; bool start = true; int segs = 1;
+    for (char c : p) {
+        if (c == '.') { if (start) return false; start = true; segs++; continue; }
+        if (start && !isalpha((unsigned char)c)) return false;
+        if (!(isalnum((unsigned char)c) || c == '_')) return false;
+        start = false;
+    }
+    return !start && segs >= 2;
+}
 // What a source index (F-Droid import) says about an APK, checked against the file.
 struct ApkMeta { std::string name, summary, description, license, source, iconFile, expectSha256, expectSigner, expectId; int64_t expectVersionCode = -1; };
 struct Repo {
@@ -144,6 +155,7 @@ struct Repo {
     bool addApk(const std::string& apk) { return addApk(apk, ApkMeta{}); }
     bool addApk(const std::string& apk, const ApkMeta& meta) {
         ApkInfo m = readApk(apk);
+        if (!validPackage(m.id)) throw Err(m.id + ": not a valid package name");
         std::string bytes = readFile(apk); std::string sha = sha256hex(bytes);
         if (!meta.expectSha256.empty() && meta.expectSha256 != sha) throw Err(m.id + ": SHA-256 differs from the source index");
         if (!meta.expectId.empty() && meta.expectId != m.id) throw Err("the APK is " + m.id + ", the source index says " + meta.expectId);
