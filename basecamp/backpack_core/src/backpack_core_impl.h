@@ -30,6 +30,10 @@ public:
     // Repos. privateFlag: "1" = private (ADR 0009). node: the Storage node's REST address that hosts
     // the repo's files (no built-in default); remembered as the suggestion for the next repo.
     std::string createRepo(std::string slug, std::string name, std::string privateFlag, std::string node);
+    // Member repos (ADR 0013; privateFlag "2" in createRepo): add a phone by its member code
+    // (backpack://member?pk=...), remove one by its key. Takes effect at the next publish.
+    std::string addMember(std::string slug, std::string memberLink);
+    std::string removeMember(std::string slug, std::string devicePk);
     // Does a Storage node answer? {"ok":true,"peerId":..,"addrs":[..],"warning":".."}
     std::string testNode(std::string url);
     std::string repo(std::string slug);

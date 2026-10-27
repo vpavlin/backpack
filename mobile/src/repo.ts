@@ -13,6 +13,7 @@ import * as storage from "./storage";
 import * as delivery from "./delivery";
 import * as settings from "./settings";
 import { isReadKey } from "./crypt";
+import * as member from "./member";
 import { LIMITS, isCid, isKey, peer as checkPeer, safePointerUrl, validateIndex, validatePointer } from "./schema";
 import type { App, Index, Peer, Pointer, Version } from "./schema";
 export type { App, Index, Pointer, Version };
@@ -28,6 +29,9 @@ export interface Repo {
   via?: string;            // the source of the pointer the current index came from
   readKey?: string;        // private repo (ADR 0009): from the link's x=; reads the index, pointers and file keys
   encrypted?: boolean;     // the index we hold was encrypted (proves readKey: audit PR-1)
+  members?: boolean;       // member repo (ADR 0013): the read key comes from a key bundle, per epoch
+  keyEpoch?: number;       // the epoch readKey belongs to
+  keysCid?: string;        // the key bundle readKey came from: a removed member re-keys within the epoch
 }
 export interface Source { name: string; seq?: number; error?: string }
 
@@ -51,7 +55,8 @@ export function parseLink(link: string): Repo {
   const pointers = p.getAll("u").slice(0, LIMITS.pointers).map(safePointerUrl).filter((u): u is string => !!u);
   const x = p.get("x");
   if (x !== null && !isReadKey(x)) throw new Error("the link's read key is malformed");
-  return { key: k, name, indexCid: i, peers: [node], pointers, seq: 0, ...(x ? { readKey: x } : {}) };
+  const members = p.get("m") === "1";
+  return { key: k, name, indexCid: i, peers: [node], pointers, seq: 0, ...(x ? { readKey: x } : {}), ...(members ? { members: true } : {}) };
 }
 
 /** Stored repos are re-checked on load: an index that no longer validates is dropped (the repo stays,
@@ -129,6 +134,16 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
   const peers = uniq([...(ptr?.nodes ?? []), ...repo.peers].map((p) => JSON.stringify(p))).map((s) => JSON.parse(s)).slice(0, LIMITS.nodes);
   if (!isCid(cid)) throw new Error("the index CID is malformed");
   const dir = await storage.filesDir();
+  // member repo (ADR 0013): this epoch's read key is in the signed key bundle the pointer names
+  if (ptr?.keys && ptr.epoch !== undefined && (ptr.keys !== repo.keysCid || ptr.epoch !== repo.keyEpoch || !repo.readKey) && expectSeq !== null) {
+    onStage?.("getting your key");
+    const kraw = await storage.getFile(ptr.keys, `${dir}/indexes/${ptr.keys}.keys.json`, peers, onStage, 0, onProgress, { max: 256 << 10 });
+    const body = openEnvelope(JSON.parse(kraw), repo.key, "keys");
+    const rk = await member.readKeyFromBundle(body, repo.key, ptr.epoch);
+    if (!rk) throw new Error("you're not a member of this repo (yet): show the publisher this phone's member code (Settings), they add it at their next publish");
+    repo = { ...repo, readKey: rk, keyEpoch: ptr.epoch, keysCid: ptr.keys, members: true };
+    delivery.know(repo.key, rk);
+  }
   const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress, { max: LIMITS.indexBytes });
   if (!raw) throw new Error("the index is empty or larger than 1 MB: refusing");
   const env = JSON.parse(raw);

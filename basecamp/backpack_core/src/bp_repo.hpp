@@ -4,6 +4,7 @@
 // Every operation here BLOCKS (Storage uploads, HTTP): the module runs them on a worker thread.
 #include "bp_apk.hpp"
 #include "bp_http.hpp"
+#include "bp_members.hpp"
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -134,25 +135,33 @@ struct Repo {
     void save() { writeFileAtomic(stateFile(), s.dump(2)); }
     Key key() const { return Key::fromPem(readFile(keyFile())); }
     std::string pub() const { return key().pub(); }
-    std::string readKey() const { return s.contains("readKey") && s["readKey"].is_string() ? s["readKey"].get<std::string>() : ""; }
+    // A member repo (ADR 0013) reads with the current epoch's key; a private repo with its fixed read key.
+    bool isMembers() const { return s.contains("members") && s["members"].is_object(); }
+    std::string readKey() const {
+        if (isMembers()) return s["members"].value("epochKey", std::string());
+        return s.contains("readKey") && s["readKey"].is_string() ? s["readKey"].get<std::string>() : "";
+    }
     std::string node() const {
         std::string n = s.contains("node") && s["node"].is_string() ? s["node"].get<std::string>() : "";
         if (n.empty()) throw Err("This repo has no Storage node yet: set one in its settings (a node phones can reach)");
         return n;
     }
-    std::string pointerId() const { return readKey().empty() ? pub() : topicId(readKey()); }
+    std::string pointerId() const { return readKey().empty() || isMembers() ? pub() : topicId(readKey()); }
 
-    static Repo create(const fs::path& d, const std::string& name, bool priv, const std::string& node) {
+    static Repo create(const fs::path& d, const std::string& name, bool priv, const std::string& node, bool members = false) {
         if (fs::exists(d / "repo.json")) throw Err("a repo already exists in " + d.string());
         fs::create_directories(d); ::chmod(d.c_str(), 0700);
         Repo r; r.dir = d; Key k = Key::generate(); writeFileAtomic(r.keyFile(), k.pem());
         r.s = ojson{{"name", name}, {"node", node}, {"seq", 0}, {"pointers", {{"get", json::array()}, {"put", json::array()}}}, {"apps", ojson::object()}};
-        if (priv) r.s["readKey"] = newKey();
+        // a first epoch key at once, so APKs added before the first publish are uploaded encrypted
+        if (members) r.s["members"] = ojson{{"epochLenMs", 3600000}, {"devices", json::array()}, {"epochKey", newKey()}};
+        else if (priv) r.s["readKey"] = newKey();
         r.save(); return r;
     }
 
     // Private (ADR 0009): a new read key; pointer addresses naming the old id move to the new one.
     void makePrivate(bool rotate) {
+        if (isMembers()) throw Err("a member repo already gets a new key every epoch");
         if (rotate && readKey().empty()) throw Err("this repo isn't private");
         std::string oldId = pointerId(); s["readKey"] = newKey(); std::string newId = topicId(readKey());
         auto swap = [&](std::string u) {
@@ -245,20 +254,54 @@ struct Repo {
         }
     }
 
+    // ---- members (ADR 0013) ----
+    void addMember(const std::string& link) {
+        if (!isMembers()) throw Err("this isn't a member repo");
+        MemberLink m = parseMemberLink(link);
+        for (auto& d : s["members"]["devices"]) if (d["pk"] == m.pk) throw Err("that device is already a member");
+        if (s["members"]["devices"].size() >= 2000) throw Err("too many member devices");
+        s["members"]["devices"].push_back(ojson{{"pk", m.pk}, {"name", m.name.empty() ? std::string("device") : m.name}, {"added", nowIso()}});
+        save();
+    }
+    void removeMember(const std::string& pk) {
+        if (!isMembers()) throw Err("this isn't a member repo");
+        std::vector<ojson> keep; for (auto& d : s["members"]["devices"]) if (d["pk"] != pk) keep.push_back(d);
+        s["members"]["devices"] = ojson(keep); save();
+    }
+    // A new epoch key and key bundle when the epoch moved on or the members changed.
+    void rotateMembersIfNeeded(const Key& k, Node& n) {
+        auto& m = s["members"];
+        int64_t len = std::max<int64_t>(60000, m.value("epochLenMs", 3600000LL));
+        int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        uint64_t epoch = (uint64_t)(nowMs / len);
+        std::vector<std::string> pks; for (auto& d : m["devices"]) pks.push_back(d["pk"]); std::sort(pks.begin(), pks.end());
+        std::string devHash; for (auto& p : pks) devHash += p; devHash = sha256hex(devHash);
+        if (m.contains("epochKey") && m.value("epoch", (uint64_t)0) == epoch && m.value("devHash", "") == devHash) return;
+        std::string ek = newKey(); std::string K = k.pub();
+        ojson wrapped = ojson::object(); for (auto& p : pks) wrapped[p] = wrapKey(ek, p, K, epoch);
+        std::string bundle = seal("keys", ojson{{"key", K}, {"epoch", epoch}, {"wrapped", wrapped}}, k);
+        TempDir t; fs::path f = t.p / "backpack-keys.json"; std::ofstream(f, std::ios::binary) << bundle;
+        log("members: new key for epoch " + std::to_string(epoch) + ", " + std::to_string(pks.size()) + " device(s)");
+        std::string cid = n.upload(f.string(), "backpack-keys.json", "application/json");
+        m["epoch"] = epoch; m["epochKey"] = ek; m["devHash"] = devHash; m["keysCid"] = cid; save();
+    }
+
     std::string linkFor(const std::string& indexCid, const json& nodeInfo) const {
         auto enc = [](const std::string& v) { std::string o; char h[4]; for (unsigned char c : v) { if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o += c; else if (c == ' ') o += '+'; else { std::snprintf(h, sizeof h, "%%%02X", c); o += h; } } return o; };
         std::string q = "i=" + enc(indexCid) + "&k=" + enc(pub()) + "&n=" + enc(s.value("name", "")) + "&p=" + enc(nodeInfo.value("peerId", ""));
         for (auto& a : nodeInfo.value("addrs", json::array())) q += "&a=" + enc(a.get<std::string>());
         q += "&s=" + enc(nodeInfo.value("spr", ""));
         for (auto& u : s["pointers"]["get"]) q += "&u=" + enc(u.get<std::string>());
-        if (!readKey().empty()) q += "&x=" + enc(readKey());
+        if (isMembers()) q += "&m=1";   // the key comes from the key bundle, never the link
+        else if (!readKey().empty()) q += "&x=" + enc(readKey());
         return "backpack://repo?" + q;
     }
 
     // Publish: seq+1, signed (and, private, encrypted) index to Storage, the pointer to every target.
     json publish(bool force) {
-        if (!readKey().empty()) encryptLeftovers();
         Node n{node()}; json ni = n.info();
+        if (isMembers()) rotateMembersIfNeeded(key(), n);
+        if (!readKey().empty()) encryptLeftovers();
         if (std::string w = nodeWarning(node()); !w.empty())
             log("Note: the Storage node is " + w + ": phones outside that network can't fetch this repo's files");
         ojson nodes = ojson::array(); nodes.push_back(ojson{{"peerId", ni["peerId"]}, {"addrs", ni["addrs"]}, {"spr", ni["spr"]}});
@@ -277,7 +320,9 @@ struct Repo {
         log("uploading the index...");
         std::string cid = n.upload(ixf.string(), "backpack-index.json", "application/json");
         ojson pbody{{"key", K}, {"seq", seq}, {"index", cid}, {"created", created}, {"nodes", nodes}};
-        std::string pointer = seal("pointer", pbody, k, readKey());
+        // a member repo's pointer is public and names the key bundle (ADR 0013)
+        if (isMembers()) { pbody["keys"] = s["members"]["keysCid"]; pbody["epoch"] = s["members"]["epoch"]; }
+        std::string pointer = seal("pointer", pbody, k, isMembers() ? std::string() : readKey());
         fs::path pf = dir / "latest.json"; writeFileAtomic(pf, pointer, 0644);
         s["seq"] = seq; s["lastIndex"] = cid; s["lastContentHash"] = contentHash;
         json pushed = json::array();
@@ -344,7 +389,7 @@ struct Repo {
         }
         json gets = json::array(); for (auto& u : s["pointers"]["get"]) gets.push_back(u.get<std::string>());
         json puts = json::array(); for (auto& u : s["pointers"]["put"]) { std::string t = u; puts.push_back(t.substr(0, t.find(':'))); }
-        return json{{"slug", dir.filename().string()}, {"name", s.value("name", "")}, {"key", pub()}, {"seq", s.value("seq", 0)}, {"private", !readKey().empty()},
+        return json{{"slug", dir.filename().string()}, {"name", s.value("name", "")}, {"key", pub()}, {"seq", s.value("seq", 0)}, {"private", !readKey().empty() || isMembers()}, {"members", isMembers()}, {"memberDevices", isMembers() ? json::parse(s["members"]["devices"].dump()) : json::array()}, {"epoch", isMembers() ? json(s["members"].value("epoch", (uint64_t)0)) : json()},
                     {"pointerId", pointerId()}, {"node", s.value("node", std::string())}, {"nodeWarning", s.value("node", std::string()).empty() ? std::string("no Storage node set") : nodeWarning(s.value("node", std::string()))}, {"apps", apps}, {"pointersGet", gets}, {"pointersPut", puts}, {"hasLink", s.contains("lastLink")}, {"lastIndex", s.value("lastIndex", "")}};
     }
 };

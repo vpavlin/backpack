@@ -13,10 +13,10 @@ const utf8 = (s: string) => new TextEncoder().encode(s);
 /** Open a signed envelope: signature by `key`, right kind, signed for this repo. Throws otherwise.
  *  A private repo's envelope (ADR 0009) has `enc`: the signature covers the encrypted body, which is
  *  decrypted with the repo's read key only after the signature checks. */
-export function openEnvelope<T = any>(env: any, key: string, kind: "index" | "pointer", readKey?: string): T {
+export function openEnvelope<T = any>(env: any, key: string, kind: "index" | "pointer" | "keys", readKey?: string): T {
   if (env?.backpack !== 1 || typeof env.body !== "string" || typeof env.sig !== "string") throw new Error(`not a Backpack ${kind}`);
   // exact kind (audit BP-4): a pointer says "pointer"; an index carries no kind at all
-  if (kind === "pointer" ? env.kind !== "pointer" : env.kind !== undefined) throw new Error(`expected a ${kind}`);
+  if (kind === "index" ? env.kind !== undefined : env.kind !== kind) throw new Error(`expected a ${kind}`);
   let ok = false;
   try { ok = ed25519.verify(b64urlToBytes(env.sig), utf8(env.body), b64urlToBytes(key)); } catch { ok = false; }
   if (!ok) throw new Error(`${kind} signature doesn't match the repo key`);

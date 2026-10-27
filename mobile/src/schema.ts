@@ -16,7 +16,8 @@ export interface Peer { peerId: string; addrs: string[]; spr?: string }
 export interface Version { versionCode: number; versionName: string; size: number; sha256: string; signer: string; cid: string; minSdk: number; abis: string[]; added?: string; blockSize?: number; fk?: string; csize?: number }
 export interface App { id: string; label: string; summary?: string; description?: string; license?: string; source?: string; icon: string | null; iconKey?: string; iconCsize?: number; versions: Version[] }
 export interface Index { v: number; name: string; key: string; seq: number; created: string; nodes: Peer[]; pointers: string[]; apps: App[] }
-export interface Pointer { key: string; seq: number; index: string; created: string; nodes: Peer[] }
+// keys + epoch: a member repo's key bundle (ADR 0013)
+export interface Pointer { key: string; seq: number; index: string; created: string; nodes: Peer[]; keys?: string; epoch?: number }
 
 class Bad extends Error {}
 const fail = (what: string): never => { throw new Bad(`invalid repository data: ${what}`); };
@@ -157,6 +158,7 @@ export function validatePointer(b: any, key: string): Pointer {
   return {
     key, seq: int(b.seq, "pointer seq"), index: match(b.index, CID, "pointer index cid"),
     created: str(b.created, 40, "pointer created")!, nodes: arr(b.nodes ?? [], LIMITS.nodes, "pointer nodes", peer),
+    ...(b.keys !== undefined ? { keys: match(b.keys, CID, "pointer key bundle"), epoch: int(b.epoch, "pointer epoch", 0, 2 ** 40) } : {}),
   };
 }
 

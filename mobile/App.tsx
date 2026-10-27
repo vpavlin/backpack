@@ -1,6 +1,8 @@
 // Backpack — install Android apps from repositories that live in Logos Storage.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import QRCode from "qrcode";
+import * as member from "./src/member";
 import { ActivityIndicator, Alert, AppState, Image, Linking as RNLinking, Modal, Pressable, Switch, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -329,7 +331,7 @@ function Main() {
             <Pressable onPress={() => toggleFold(r.key)} onLongPress={() => remove(r)} style={s.repoHead}>
               <Text style={s.repoName}>{folded[r.key] ? "▸ " : "▾ "}{r.name}</Text>
               <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps${folded[r.key] ? (() => { const n = r.index!.apps.filter((a) => (installed[a.id] ?? -1) >= 0 && (installed[a.id] ?? -1) < (a.versions[0]?.versionCode ?? 0)).length; return n ? ` (${n} update${n > 1 ? "s" : ""})` : ""; })() : ""} · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
-              <Text style={s.repoKey}>{r.readKey ? "🔒 private · " : ""}publisher key {keyShort(r.key)}</Text>
+              <Text style={s.repoKey}>{r.members ? "👥 members · " : r.readKey ? "🔒 private · " : ""}publisher key {keyShort(r.key)}</Text>
               {!!r.sources?.length && (
                 <Text style={s.repoKey}>
                   {r.via ? `#${r.seq ?? 0} came from ${r.via} · ` : ""}
@@ -403,10 +405,49 @@ function SettingsScreen({ prefs, onChange, onClose }: { prefs: settingsStore.Set
       <ScrollView contentContainerStyle={{ padding: 12 }}>
         <Row title="Install app updates automatically" value={prefs.autoInstall} onValue={(v) => onChange({ autoInstall: v })}
           body="Repositories are always checked when Backpack opens. With this on, updates for apps you have installed are then downloaded and installed too (Android may still ask you to confirm). Off: you tap Update yourself." />
+        <MemberCode />
         <Row title="Also check repositories' web addresses" value={prefs.webPointers} onValue={(v) => onChange({ webPointers: v })}
           body="How Backpack learns about a new repository version. Off: only over Logos Delivery, through the Loam app. On: also from each repository's HTTPS address. Only the small signed update note ever comes from the web; the app list and the APKs always come from Logos Storage, and every note is checked against the repository's key." />
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+// A QR drawn with Views (no native module): runs of dark modules per row become one View each.
+function Qr({ text, size }: { text: string; size: number }) {
+  const m = QRCode.create(text, { errorCorrectionLevel: "M" }).modules;
+  const n = m.size, quiet = 3, cell = size / (n + 2 * quiet);
+  const rows = [];
+  for (let y = 0; y < n; y++) {
+    const runs = []; let x = 0;
+    while (x < n) {
+      if (!m.data[y * n + x]) { x++; continue; }
+      let e = x; while (e < n && m.data[y * n + e]) e++;
+      runs.push(<View key={x} style={{ position: "absolute", left: (x + quiet) * cell, width: (e - x) * cell, top: 0, bottom: 0, backgroundColor: "#000" }} />);
+      x = e;
+    }
+    rows.push(<View key={y} style={{ position: "absolute", top: (y + quiet) * cell, height: cell + 0.5, left: 0, right: 0 }}>{runs}</View>);
+  }
+  return <View style={{ width: size, height: size, backgroundColor: "#fff", borderRadius: 8 }}>{rows}</View>;
+}
+
+// This phone's member code (ADR 0013): the publisher of a member repo scans it to give this phone access.
+function MemberCode() {
+  const [link, setLink] = useState("");
+  const [shown, setShown] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => { member.memberLink("Backpack phone").then(setLink).catch((e) => setErr(String(e?.message ?? e))); }, []);
+  return (
+    <View style={s.card}>
+      <Text style={s.appName}>This phone's member code</Text>
+      <Text style={[s.hint, { marginTop: 4 }]}>For repos shared with members: the publisher scans this (or you send them the link) and adds this phone. It isn't secret: it only lets someone give this phone access.</Text>
+      {shown && !!link && <View style={{ alignItems: "center", marginVertical: 10 }}><Qr text={link} size={260} /></View>}
+      {!!err && <Text style={[s.hint, { color: C.err }]}>Can't make this phone's key: {err}</Text>}
+      <View style={s.row}>
+        <Pressable style={s.btnGhost} onPress={() => setShown((v) => !v)}><Text style={s.btnGhostT}>{shown ? "Hide code" : "Show code"}</Text></Pressable>
+        <Pressable style={s.btnGhost} disabled={!link} onPress={async () => { await Clipboard.setStringAsync(link); Alert.alert("Copied", "Send it to the repo's publisher."); }}><Text style={s.btnGhostT}>Copy link</Text></Pressable>
+      </View>
+    </View>
   );
 }
 

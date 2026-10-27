@@ -29,6 +29,7 @@ logos_module(
         src/bp_fdroid.hpp
         src/bp_sign.hpp
         src/bp_keys.hpp
+        src/bp_members.hpp
         src/qrcodegen.hpp
         src/qrcodegen.cpp
     INCLUDE_DIRS src

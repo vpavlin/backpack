@@ -92,7 +92,7 @@ std::string BackpackCoreImpl::createRepo(std::string slug, std::string name, std
     if (name.empty() || name.size() > 100) return fail("Give the repo a name (at most 100 characters)");
     if (!node.empty() && node.rfind("http://", 0) != 0 && node.rfind("https://", 0) != 0) return fail("The Storage node is its REST address: http(s)://...");
     try {
-        bp::Repo r = bp::Repo::create(repoDir(slug), name, privateFlag == "1", node);
+        bp::Repo r = bp::Repo::create(repoDir(slug), name, privateFlag == "1", node, privateFlag == "2");
         if (!node.empty()) { m_lastNode = node; savePrefs(); }
         return ok(json{{"repo", r.summary()}});
     }
@@ -128,6 +128,19 @@ std::string BackpackCoreImpl::rotateReadKey(std::string slug) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!validSlug(slug) || m_busyRepo.count(slug)) return fail("The repo is busy");
     try { bp::Repo r = bp::Repo::load(repoDir(slug)); r.makePrivate(true); return ok(json{{"repo", r.summary()}}); }
+    catch (std::exception& e) { return fail(e.what()); }
+}
+
+std::string BackpackCoreImpl::addMember(std::string slug, std::string memberLink) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!validSlug(slug) || m_busyRepo.count(slug)) return fail("The repo is busy");
+    try { bp::Repo r = bp::Repo::load(repoDir(slug)); r.addMember(memberLink); return ok(json{{"repo", r.summary()}, {"note", "Publish to give it access"}}); }
+    catch (std::exception& e) { return fail(e.what()); }
+}
+std::string BackpackCoreImpl::removeMember(std::string slug, std::string devicePk) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!validSlug(slug) || m_busyRepo.count(slug)) return fail("The repo is busy");
+    try { bp::Repo r = bp::Repo::load(repoDir(slug)); r.removeMember(devicePk); return ok(json{{"repo", r.summary()}, {"note", "Publish to take its access away for new versions"}}); }
     catch (std::exception& e) { return fail(e.what()); }
 }
 
