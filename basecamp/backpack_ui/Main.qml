@@ -320,7 +320,7 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 DField { id: nNode; placeholderText: "http://storage.example.org:8080" }
-                LogosButton { text: "Test"; enabled: nNode.text.length > 8; onClicked: root.testNode(nNode.text.trim(), nNodeMsg) }
+                LogosButton { Layout.preferredWidth: 120; text: "Test"; enabled: nNode.text.length > 8; onClicked: root.testNode(nNode.text.trim(), nNodeMsg) }
             }
             Sub { id: nNodeMsg; Layout.fillWidth: true; visible: text !== "" }
             CheckBox { id: nPriv; text: "Private: only people with the invite link can read it"; contentItem: Text { leftPadding: 28; text: nPriv.text; color: root.cText; font.pixelSize: 13; textFormat: Text.PlainText; verticalAlignment: Text.AlignVCenter } }
@@ -406,7 +406,7 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 DField { id: sNode }
-                LogosButton { text: "Test"; enabled: sNode.text.length > 8; onClicked: root.testNode(sNode.text.trim(), sNodeMsg) }
+                LogosButton { Layout.preferredWidth: 120; text: "Test"; enabled: sNode.text.length > 8; onClicked: root.testNode(sNode.text.trim(), sNodeMsg) }
             }
             Sub { id: sNodeMsg; Layout.fillWidth: true; visible: text !== "" }
             Sub { text: "Web addresses of the update note phones may read (https, one per line)" }
@@ -444,7 +444,7 @@ Item {
                         T { text: modelData.package; font.bold: true }
                         Sub { text: modelData.name + " · " + modelData.type + " · certificate " + modelData.cert.slice(0, 16) + "…" }
                     }
-                    LogosButton { text: "Export"; onClicked: { exportDialog.pkg = modelData.package; exportDialog.open() } }
+                    LogosButton { Layout.preferredWidth: 120; text: "Export"; onClicked: { exportDialog.pkg = modelData.package; exportDialog.open() } }
                 }
             }
             Sub { visible: keysDialog.list.length === 0; text: "No keys yet." }
@@ -454,13 +454,13 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 DField { id: kName; placeholderText: "Name in the certificate (optional)" }
-                LogosButton { text: "Create key"; enabled: kPkg.text.length > 3
+                LogosButton { Layout.preferredWidth: 120; text: "Create key"; enabled: kPkg.text.length > 3
                     onClicked: root.act("createKey", [kPkg.text.trim(), kName.text.trim()], "Key created: export a backup now", function () { keysDialog.reload() }) }
             }
             RowLayout {
                 Layout.fillWidth: true
                 DField { id: kPass; placeholderText: "Keystore password (to import a .p12)"; echoMode: TextInput.Password }
-                LogosButton { text: "Import .p12…"; enabled: kPkg.text.length > 3; onClicked: importKeyDialog.open() }
+                LogosButton { Layout.preferredWidth: 120; text: "Import .p12…"; enabled: kPkg.text.length > 3; onClicked: importKeyDialog.open() }
             }
             RowLayout { Item { Layout.fillWidth: true } LogosButton { text: "Close"; onClicked: keysDialog.close() } }
         }
