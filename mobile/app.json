@@ -3,7 +3,7 @@
     "name": "Backpack",
     "slug": "backpack",
     "scheme": "backpack",
-    "version": "0.2.14",
+    "version": "0.2.15",
     "platforms": [
       "android"
     ],
@@ -12,7 +12,7 @@
     "backgroundColor": "#14161a",
     "android": {
       "package": "xyz.vpavlin.backpack",
-      "versionCode": 20,
+      "versionCode": 21,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#14161a"
@@ -21,7 +21,8 @@
         "android.permission.INTERNET",
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "android.permission.QUERY_ALL_PACKAGES",
-        "android.permission.REQUEST_DELETE_PACKAGES"
+        "android.permission.REQUEST_DELETE_PACKAGES",
+        "android.permission.CAMERA"
       ],
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO",
@@ -30,7 +31,15 @@
     },
     "plugins": [
       "./plugins/withBackpackNative",
-      "./src/lib/loam-transport-pkg/plugins/withDeliveryClient.js"
+      "./src/lib/loam-transport-pkg/plugins/withDeliveryClient.js",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Backpack uses the camera only to read a repository's QR code.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ]
     ]
   }
 }

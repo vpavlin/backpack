@@ -1,5 +1,6 @@
 // Backpack — install Android apps from repositories that live in Logos Storage.
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { ActivityIndicator, Alert, AppState, Image, Linking as RNLinking, Modal, Pressable, Switch, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -42,6 +43,20 @@ function Main() {
   const [repos, setRepos] = useState<R.Repo[]>([]);
   const [busy, setBusy] = useState<string | null>(null);   // repo-level activity line
   const [adding, setAdding] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [camPerm, requestCamPerm] = useCameraPermissions();
+  const scanned = useRef(false);
+  // the QR codes the Basecamp app, the website and the CLI print are backpack:// repo links
+  const startScan = async () => {
+    const p = camPerm?.granted ? camPerm : await requestCamPerm();
+    if (!p.granted) { Alert.alert("Camera not allowed", "Backpack needs the camera only to read a repository's QR code. You can allow it in Android's app settings, or paste the link instead."); return; }
+    scanned.current = false; setScanning(true);
+  };
+  const onScanned = ({ data }: { data: string }) => {
+    if (scanned.current) return;
+    if (!/^backpack:\/\/repo\?/i.test(String(data).trim())) return;   // keep scanning: not a Backpack repo code
+    scanned.current = true; setScanning(false); setLink(String(data).trim()); add(String(data).trim());
+  };
   const [link, setLink] = useState("");
   const [installed, setInstalled] = useState<Record<string, number>>({});
   const [stage, setStage] = useState<Record<string, string>>({}); // app id → install stage
@@ -283,11 +298,23 @@ function Main() {
           <Text style={s.label}>Repository link</Text>
           <TextInput value={link} onChangeText={setLink} placeholder="backpack://repo?i=…" placeholderTextColor={C.dim} style={s.input} autoCapitalize="none" autoCorrect={false} multiline />
           <View style={s.row}>
+            <Pressable style={s.btnGhost} onPress={startScan}><Text style={s.btnGhostT}>Scan QR</Text></Pressable>
             <Pressable style={s.btnGhost} onPress={async () => setLink(await Clipboard.getStringAsync())}><Text style={s.btnGhostT}>Paste</Text></Pressable>
             <Pressable style={[s.btn, !link && { opacity: 0.4 }]} disabled={!link || !!busy} onPress={() => add(link)}><Text style={s.btnT}>Add</Text></Pressable>
           </View>
           <Text style={s.hint}>Or just open a backpack:// link on this phone.</Text>
         </View>
+      )}
+      {scanning && (   // rendered only while scanning: a hidden Modal still mounts its body (and the camera)
+        <Modal visible animationType="slide" onRequestClose={() => setScanning(false)}>
+          <View style={{ flex: 1, backgroundColor: "#000" }}>
+            <CameraView style={{ flex: 1 }} facing="back" barcodeScannerSettings={{ barcodeTypes: ["qr"] }} onBarcodeScanned={onScanned} />
+            <View style={{ position: "absolute", left: 0, right: 0, bottom: 40, alignItems: "center", gap: 12 }}>
+              <Text style={{ color: "#fff", fontSize: 15, textAlign: "center", paddingHorizontal: 24 }}>Point the camera at a Backpack repository's QR code</Text>
+              <Pressable style={s.btnGhost} onPress={() => setScanning(false)}><Text style={s.btnGhostT}>Cancel</Text></Pressable>
+            </View>
+          </View>
+        </Modal>
       )}
 
       <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 40 }} refreshControl={<RefreshControl refreshing={false} onRefresh={refreshAll} tintColor={C.accent} />}>
