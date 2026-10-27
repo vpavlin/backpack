@@ -1,0 +1,63 @@
+# linux-arm64 builds of the Basecamp modules (basecamp/backpack_core, basecamp/backpack_ui), merged afterwards
+# into the linux-amd64 packages as a second variant (lgx merge). vpavlin runs Basecamp on an ARMv8.0 Duet.
+#
+# Push a tag `basecamp-arm64-<version>` or run it by hand; the packages and their sha256 sums are attached
+# to a release named after the tag.
+name: Basecamp linux-arm64 packages
+
+on:
+  push:
+    tags: ["basecamp-arm64-*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://cache.nix.logos.co/public
+            extra-trusted-public-keys = public:Z1wyVBEx8PHbXujYB52Mysv9Rd8rWIhyQ3bQyef9yy4=
+            accept-flake-config = true
+      - name: Build
+        shell: bash
+        run: |
+          set -u -o pipefail
+          mkdir -p out
+          for m in backpack_core backpack_ui; do
+            echo "::group::$m"
+            if ! nix build --accept-flake-config "./basecamp/$m#lgx-portable" -o "res-$m" > "$m.log" 2>&1; then
+              tail -100 "$m.log"; exit 1
+            fi
+            cp res-$m/*.lgx "out/$m-linux-arm64.lgx"
+            echo "::endgroup::"
+          done
+          (cd out && sha256sum *.lgx > SHA256SUMS && cat SHA256SUMS)
+      # ARMv8.0 machines (e.g. a Lenovo Duet) die on inline LSE atomics (ARMv8.1) with an illegal
+      # instruction: anything other than the __aarch64_* outline helpers fails the build.
+      - name: No inline LSE atomics
+        shell: bash
+        run: |
+          set -eu -o pipefail
+          bad=0
+          for f in out/*.lgx; do
+            d=$(mktemp -d); tar xzf "$f" -C "$d"
+            while read -r so; do
+              n=$(objdump -d "$so" | awk '/^[0-9a-f]+ <.*>:$/ {fn=$2} $3 ~ /^(ldadd|ldclr|ldeor|ldset|ldsmax|ldsmin|ldumax|ldumin|swp|cas)/ { if (fn !~ /__aarch64_/) c++ } END {print c+0}')
+              echo "$(basename "$so"): $n inline LSE atomics"
+              [ "$n" = 0 ] || bad=1
+            done < <(find "$d/variants" -name '*.so')
+          done
+          exit $bad
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            out/*.lgx
+            out/SHA256SUMS
