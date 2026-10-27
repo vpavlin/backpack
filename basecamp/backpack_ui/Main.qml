@@ -99,6 +99,17 @@ Item {
     // ── helpers
     function keyShort(k) { return k ? k.slice(0, 6) + "…" + k.slice(-4) : "" }
     function mb(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " kB" }
+    // Test a Storage node and show the outcome in `label`
+    function testNode(url, label) {
+        label.color = root.cSub; label.text = "Asking " + url + "…"
+        root.core("testNode", [url], function (raw) {
+            var r = root.parse(raw)
+            if (!r) { label.color = root.cBad; label.text = "No answer from backpack_core"; return }
+            if (!r.ok) { label.color = root.cBad; label.text = r.error; return }
+            label.color = r.warning ? root.cWarn : root.cOk
+            label.text = "Answers (peer " + String(r.peerId).slice(-8) + ", " + (r.addrs || []).length + " address(es))" + (r.warning ? ". But it's " + r.warning + ": phones outside that network can't reach it." : ".")
+        })
+    }
     function urlToPath(u) { var s = String(u); return s.indexOf("file://") === 0 ? decodeURIComponent(s.slice(7)) : s }
     TextEdit { id: clip; visible: false }
     function copyText(t) { clip.text = t; clip.selectAll(); clip.copy(); clip.deselect(); toast("Copied", false) }
@@ -153,6 +164,7 @@ Item {
                     }
                 }
                 LogosButton { text: "+ New repo"; Layout.fillWidth: true; onClicked: newDialog.open() }
+                LogosButton { text: "Signing keys"; Layout.fillWidth: true; onClicked: keysDialog.show() }
                 Sub { text: root.coreSeen ? ("Repos in " + root.st.dataDir + " · core " + root.st.version) : (root.missed > 2 ? "Can't reach backpack_core" : "Connecting…"); Layout.fillWidth: true; color: !root.coreSeen && root.missed > 2 ? root.cBad : root.cFaint }
             }
         }
@@ -176,7 +188,9 @@ Item {
                             Badge { visible: !!(root.cur && !root.cur.private); text: "public"; tone: root.cOk }
                             Badge { visible: !!(root.cur && root.cur.busy); text: "working…"; tone: root.cAccent }
                         }
-                        Sub { text: root.cur ? ("#" + root.cur.seq + " · publisher key " + root.keyShort(root.cur.key) + " · Storage node " + root.cur.node) : ""; Layout.fillWidth: true }
+                        Sub { text: root.cur ? ("#" + root.cur.seq + " · publisher key " + root.keyShort(root.cur.key) + " · Storage node " + (root.cur.node || "not set")) : ""; Layout.fillWidth: true }
+                        Sub { visible: !!(root.cur && root.cur.nodeWarning); color: root.cWarn; Layout.fillWidth: true
+                              text: root.cur ? (root.cur.node ? "The Storage node is " + root.cur.nodeWarning + ": phones outside that network can't fetch this repo." : "Set a Storage node in Settings before publishing.") : "" }
                         Sub { text: root.cur ? ("Update note: " + (root.cur.pointersGet.length ? root.cur.pointersGet.join(", ") : "no web address") + (root.cur.pointersPut.length ? " · sent via " + root.cur.pointersPut.join(", ") : " · not sent anywhere")) : ""; Layout.fillWidth: true }
                     }
                 }
@@ -294,7 +308,7 @@ Item {
     Popup {
         id: newDialog; modal: true; anchors.centerIn: parent; width: 440; padding: 18
         background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
-        onOpened: { nName.text = ""; nSlug.text = ""; nPriv.checked = false; nName.forceActiveFocus() }
+        onOpened: { nName.text = ""; nSlug.text = ""; nSlug.edited = false; nPriv.checked = false; nNode.text = root.st.lastNode || ""; nNodeMsg.text = ""; nName.forceActiveFocus() }
         ColumnLayout {
             width: parent.width; spacing: 10
             T { text: "New repo"; font.bold: true; font.pixelSize: 17 }
@@ -302,12 +316,19 @@ Item {
             DField { id: nName; placeholderText: "vpavlin's apps"; onTextEdited: if (!nSlug.edited) nSlug.text = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) }
             Sub { text: "Folder id (letters, digits, - and _)" }
             DField { id: nSlug; property bool edited: false; onTextEdited: edited = true }
+            Sub { text: "Storage node that hosts the files (its REST address). Phones download from it, so it must be reachable from where they are."; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                DField { id: nNode; placeholderText: "http://storage.example.org:8080" }
+                LogosButton { text: "Test"; enabled: nNode.text.length > 8; onClicked: root.testNode(nNode.text.trim(), nNodeMsg) }
+            }
+            Sub { id: nNodeMsg; Layout.fillWidth: true; visible: text !== "" }
             CheckBox { id: nPriv; text: "Private: only people with the invite link can read it"; contentItem: Text { leftPadding: 28; text: nPriv.text; color: root.cText; font.pixelSize: 13; textFormat: Text.PlainText; verticalAlignment: Text.AlignVCenter } }
             RowLayout {
                 Item { Layout.fillWidth: true }
                 LogosButton { text: "Cancel"; onClicked: newDialog.close() }
                 LogosButton { text: "Create"; enabled: nName.text.length > 0 && nSlug.text.length > 0
-                    onClicked: { var slug = nSlug.text; root.act("createRepo", [slug, nName.text, nPriv.checked ? "1" : "0"], "Repo created", function () { root.sel = slug; newDialog.close() }) } }
+                    onClicked: { var slug = nSlug.text; root.act("createRepo", [slug, nName.text, nPriv.checked ? "1" : "0", nNode.text.trim()], "Repo created", function () { root.sel = slug; newDialog.close() }) } }
             }
         }
     }
@@ -374,15 +395,20 @@ Item {
         background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
         function show() {
             if (!root.cur) return
-            sName.text = root.cur.name; sNode.text = root.cur.node; sGet.text = root.cur.pointersGet.join("\n"); open()
+            sName.text = root.cur.name; sNode.text = root.cur.node; sNodeMsg.text = ""; sGet.text = root.cur.pointersGet.join("\n"); open()
         }
         ColumnLayout {
             width: parent.width; spacing: 10
             T { text: "Repo settings"; font.bold: true; font.pixelSize: 17 }
             Sub { text: "Name" }
             DField { id: sName }
-            Sub { text: "Storage node (its REST address). Phones must be able to fetch from it: use a public node, not this computer behind a router." }
-            DField { id: sNode }
+            Sub { text: "Storage node (its REST address). Phones must be able to fetch from it: use a public node, not this computer behind a router."; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                DField { id: sNode }
+                LogosButton { text: "Test"; enabled: sNode.text.length > 8; onClicked: root.testNode(sNode.text.trim(), sNodeMsg) }
+            }
+            Sub { id: sNodeMsg; Layout.fillWidth: true; visible: text !== "" }
             Sub { text: "Web addresses of the update note phones may read (https, one per line)" }
             TextArea { id: sGet; Layout.fillWidth: true; Layout.preferredHeight: 70; color: root.cText; font.pixelSize: 13; background: Rectangle { radius: 6; color: root.cBg; border.color: root.cLine } }
             Sub { text: "Where publish sends the note is set with the CLI for now (backpack config --pointer-put)."; Layout.fillWidth: true }
@@ -396,6 +422,71 @@ Item {
                     } }
             }
         }
+    }
+
+    // ── signing keys (one per app; the key is the app's identity)
+    Popup {
+        id: keysDialog; modal: true; anchors.centerIn: parent; width: 600; padding: 18
+        property var list: []
+        background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        function show() { reload(); open() }
+        function reload() { root.core("keys", [], function (raw) { var r = root.parse(raw); keysDialog.list = (r && r.ok) ? r.keys : [] }) }
+        ColumnLayout {
+            width: parent.width; spacing: 10
+            T { text: "Signing keys"; font.bold: true; font.pixelSize: 17 }
+            Sub { Layout.fillWidth: true; text: "Add an UNSIGNED APK and Backpack signs it with its app's key. A key is the app's identity for good: phones only accept updates signed with the same key, so export a backup and keep it safe." }
+            Repeater {
+                model: keysDialog.list
+                RowLayout {
+                    Layout.fillWidth: true
+                    ColumnLayout {
+                        Layout.fillWidth: true; spacing: 1
+                        T { text: modelData.package; font.bold: true }
+                        Sub { text: modelData.name + " · " + modelData.type + " · certificate " + modelData.cert.slice(0, 16) + "…" }
+                    }
+                    LogosButton { text: "Export"; onClicked: { exportDialog.pkg = modelData.package; exportDialog.open() } }
+                }
+            }
+            Sub { visible: keysDialog.list.length === 0; text: "No keys yet." }
+            Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
+            Sub { text: "App package name (from its build, e.g. org.example.app)" }
+            DField { id: kPkg; placeholderText: "org.example.app" }
+            RowLayout {
+                Layout.fillWidth: true
+                DField { id: kName; placeholderText: "Name in the certificate (optional)" }
+                LogosButton { text: "Create key"; enabled: kPkg.text.length > 3
+                    onClicked: root.act("createKey", [kPkg.text.trim(), kName.text.trim()], "Key created: export a backup now", function () { keysDialog.reload() }) }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                DField { id: kPass; placeholderText: "Keystore password (to import a .p12)"; echoMode: TextInput.Password }
+                LogosButton { text: "Import .p12…"; enabled: kPkg.text.length > 3; onClicked: importKeyDialog.open() }
+            }
+            RowLayout { Item { Layout.fillWidth: true } LogosButton { text: "Close"; onClicked: keysDialog.close() } }
+        }
+    }
+    FileDialog {
+        id: importKeyDialog; title: "PKCS#12 keystore to import"; fileMode: FileDialog.OpenFile; nameFilters: ["Keystores (*.p12 *.pfx *.keystore *.jks)", "All files (*)"]
+        onAccepted: { root.act("importKey", [kPkg.text.trim(), root.urlToPath(selectedFile), kPass.text], "Key imported", function () { kPass.text = ""; keysDialog.reload() }) }
+    }
+    Popup {
+        id: exportDialog; modal: true; anchors.centerIn: parent; width: 460; padding: 18
+        property string pkg: ""
+        background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        onOpened: ePass.text = ""
+        ColumnLayout {
+            width: parent.width; spacing: 10
+            T { text: "Export the " + exportDialog.pkg + " key"; font.bold: true; Layout.fillWidth: true }
+            Sub { Layout.fillWidth: true; text: "A password-protected PKCS#12 file (Gradle, apksigner and keytool read it). Keep it somewhere safe and offline." }
+            DField { id: ePass; placeholderText: "Password (8+ characters)"; echoMode: TextInput.Password }
+            RowLayout { Item { Layout.fillWidth: true }
+                LogosButton { text: "Cancel"; onClicked: exportDialog.close() }
+                LogosButton { text: "Save as…"; enabled: ePass.text.length >= 8; onClicked: exportSave.open() } }
+        }
+    }
+    FileDialog {
+        id: exportSave; title: "Save the key backup"; fileMode: FileDialog.SaveFile; nameFilters: ["PKCS#12 (*.p12)"]
+        onAccepted: { root.act("exportKey", [exportDialog.pkg, root.urlToPath(selectedFile), ePass.text], "Backup saved", function () { exportDialog.close() }) }
     }
 
     Popup {

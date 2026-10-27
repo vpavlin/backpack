@@ -23,7 +23,8 @@ constexpr int KEEP_VERSIONS = 3;
 constexpr size_t MAX_APPS = 500;
 constexpr uint64_t BIG_BLOCK = 524288;
 inline uint64_t blockSizeFor(uint64_t n) { return n > (1u << 17) ? BIG_BLOCK : 65536; }
-inline const char* DEFAULT_NODE = "http://[fdb0:9afc:a5ef:f167:7ad7:68b7:aca0:b9fa]:8480";
+// No built-in Storage node: every repo names the node that hosts its files (its REST API). Phones fetch
+// from it, so it must be reachable from where they are (see nodeWarning).
 
 using Log = std::function<void(const std::string&)>;
 using Progress = std::function<void(const std::string& what, int64_t done, int64_t total)>;
@@ -88,6 +89,23 @@ struct Node {
     }
 };
 
+// A Storage node address phones elsewhere probably can't reach: loopback, private or link-local ranges,
+// IPv6 ULA (mesh overlays), .local/.lan names. Empty string = looks public.
+inline std::string nodeWarning(const std::string& url) {
+    auto p = url.find("://"); if (p == std::string::npos) return "not an http(s) address";
+    std::string h = url.substr(p + 3); h = h.substr(0, h.find('/'));
+    if (!h.empty() && h[0] == '[') h = h.substr(1, h.find(']') - 1); else h = h.substr(0, h.rfind(':') == std::string::npos ? h.size() : h.rfind(':'));
+    for (auto& c : h) c = (char)tolower((unsigned char)c);
+    auto starts = [&](const char* x) { return h.rfind(x, 0) == 0; };
+    auto ends = [&](const char* x) { std::string e(x); return h.size() >= e.size() && h.compare(h.size() - e.size(), e.size(), e) == 0; };
+    if (h == "localhost" || starts("127.") || h == "::1") return "this computer only";
+    if (starts("10.") || starts("192.168.") || starts("169.254.") || ends(".local") || ends(".lan") || ends(".home.arpa")) return "a local network address";
+    if (starts("172.")) { int b = std::atoi(h.c_str() + 4); if (b >= 16 && b <= 31) return "a local network address"; }
+    if (starts("100.")) { int b = std::atoi(h.c_str() + 4); if (b >= 64 && b <= 127) return "a carrier/VPN (CGNAT) address"; }
+    if (starts("fd") || starts("fc") || starts("fe80")) return "a private IPv6 (mesh/VPN) address";
+    return "";
+}
+
 // ---- a repo ----------------------------------------------------------------------------------------
 // Copy without some keys (works on every nlohmann version's ordered_map).
 inline ojson without(const ojson& o, std::initializer_list<const char*> keys) {
@@ -117,14 +135,18 @@ struct Repo {
     Key key() const { return Key::fromPem(readFile(keyFile())); }
     std::string pub() const { return key().pub(); }
     std::string readKey() const { return s.contains("readKey") && s["readKey"].is_string() ? s["readKey"].get<std::string>() : ""; }
-    std::string node() const { return s.value("node", std::string(DEFAULT_NODE)); }
+    std::string node() const {
+        std::string n = s.contains("node") && s["node"].is_string() ? s["node"].get<std::string>() : "";
+        if (n.empty()) throw Err("This repo has no Storage node yet: set one in its settings (a node phones can reach)");
+        return n;
+    }
     std::string pointerId() const { return readKey().empty() ? pub() : topicId(readKey()); }
 
     static Repo create(const fs::path& d, const std::string& name, bool priv, const std::string& node) {
         if (fs::exists(d / "repo.json")) throw Err("a repo already exists in " + d.string());
         fs::create_directories(d); ::chmod(d.c_str(), 0700);
         Repo r; r.dir = d; Key k = Key::generate(); writeFileAtomic(r.keyFile(), k.pem());
-        r.s = ojson{{"name", name}, {"node", node.empty() ? DEFAULT_NODE : node}, {"seq", 0}, {"pointers", {{"get", json::array()}, {"put", json::array()}}}, {"apps", ojson::object()}};
+        r.s = ojson{{"name", name}, {"node", node}, {"seq", 0}, {"pointers", {{"get", json::array()}, {"put", json::array()}}}, {"apps", ojson::object()}};
         if (priv) r.s["readKey"] = newKey();
         r.save(); return r;
     }
@@ -237,6 +259,8 @@ struct Repo {
     json publish(bool force) {
         if (!readKey().empty()) encryptLeftovers();
         Node n{node()}; json ni = n.info();
+        if (std::string w = nodeWarning(node()); !w.empty())
+            log("Note: the Storage node is " + w + ": phones outside that network can't fetch this repo's files");
         ojson nodes = ojson::array(); nodes.push_back(ojson{{"peerId", ni["peerId"]}, {"addrs", ni["addrs"]}, {"spr", ni["spr"]}});
         std::vector<ojson> apps; for (auto& [k, a] : s["apps"].items()) apps.push_back(a);
         std::sort(apps.begin(), apps.end(), [](const ojson& a, const ojson& b) { return a.value("label", "") < b.value("label", ""); });
@@ -321,7 +345,7 @@ struct Repo {
         json gets = json::array(); for (auto& u : s["pointers"]["get"]) gets.push_back(u.get<std::string>());
         json puts = json::array(); for (auto& u : s["pointers"]["put"]) { std::string t = u; puts.push_back(t.substr(0, t.find(':'))); }
         return json{{"slug", dir.filename().string()}, {"name", s.value("name", "")}, {"key", pub()}, {"seq", s.value("seq", 0)}, {"private", !readKey().empty()},
-                    {"pointerId", pointerId()}, {"node", node()}, {"apps", apps}, {"pointersGet", gets}, {"pointersPut", puts}, {"hasLink", s.contains("lastLink")}, {"lastIndex", s.value("lastIndex", "")}};
+                    {"pointerId", pointerId()}, {"node", s.value("node", std::string())}, {"nodeWarning", s.value("node", std::string()).empty() ? std::string("no Storage node set") : nodeWarning(s.value("node", std::string()))}, {"apps", apps}, {"pointersGet", gets}, {"pointersPut", puts}, {"hasLink", s.contains("lastLink")}, {"lastIndex", s.value("lastIndex", "")}};
     }
 };
 }  // namespace bp

@@ -5,7 +5,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     bp::fs::path d = bp::fs::path(argv[1]) / argv[2];
     try {
-        bp::Repo r = bp::fs::exists(d / "repo.json") ? bp::Repo::load(d) : bp::Repo::create(d, std::string("import test ") + argv[2], false, "");
+        bp::Repo r = bp::fs::exists(d / "repo.json") ? bp::Repo::load(d) : bp::Repo::create(d, std::string("import test ") + argv[2], false, "http://[fdb0:9afc:a5ef:f167:7ad7:68b7:aca0:b9fa]:8480");
         r.log = [](const std::string& m) { std::cout << m << "\n"; };
         bp::ImportOpts o; o.url = argv[3]; o.fingerprint = argv[4]; if (argc > 5) o.only.insert(argv[5]);
         std::cout << bp::importFdroid(r, o).dump() << "\n";

@@ -27,8 +27,11 @@ public:
     // Where the repos live (default ~/.backpack, shared with the CLI).
     std::string setDataDir(std::string path);
 
-    // Repos. privateFlag: "1" = private (ADR 0009).
-    std::string createRepo(std::string slug, std::string name, std::string privateFlag);
+    // Repos. privateFlag: "1" = private (ADR 0009). node: the Storage node's REST address that hosts
+    // the repo's files (no built-in default); remembered as the suggestion for the next repo.
+    std::string createRepo(std::string slug, std::string name, std::string privateFlag, std::string node);
+    // Does a Storage node answer? {"ok":true,"peerId":..,"addrs":[..],"warning":".."}
+    std::string testNode(std::string url);
     std::string repo(std::string slug);
     // The invite link and its QR matrix. A private repo's link carries the read key.
     std::string link(std::string slug);
@@ -38,7 +41,15 @@ public:
     std::string configure(std::string slug, std::string patchJson);
     std::string removeVersion(std::string slug, std::string appId, std::string versionCode);
 
-    // Jobs (run in the background; follow them in snapshot().jobs).
+    // APK signing keys, one per app (package), in <data dir>/signing. The key is the app's identity:
+    // every later version must be signed with it, so export a backup.
+    std::string keys();
+    std::string createKey(std::string package, std::string name);
+    std::string importKey(std::string package, std::string p12Path, std::string password);
+    std::string exportKey(std::string package, std::string p12Path, std::string password);
+
+    // Jobs (run in the background; follow them in snapshot().jobs). An unsigned APK is signed with its
+    // package's key when there is one.
     std::string addApk(std::string slug, std::string apkPath);
     std::string publish(std::string slug, std::string force);
     std::string verify(std::string slug, std::string deep);
@@ -60,6 +71,9 @@ private:
 
     std::recursive_mutex m_mtx;
     std::string m_dataDir;
+    std::string m_lastNode;
+    void loadPrefs();
+    void savePrefs();
     std::map<int, std::shared_ptr<Job>> m_jobs;
     std::map<std::string, int> m_busyRepo;
     int m_nextJob = 1;

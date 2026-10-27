@@ -39,7 +39,6 @@ struct JarManifest {
         return m;
     }
 };
-inline std::string b64std(const Bytes& b) { std::string s = b64url(b); for (auto& c : s) { if (c == '-') c = '+'; else if (c == '_') c = '/'; } while (s.size() % 4) s += '='; return s; }
 
 // Verify entry.jar; returns entry.json's text. fingerprint: lowercase hex SHA-256 of the signer cert.
 inline std::string verifiedEntryJson(const fs::path& jarPath, const std::string& fingerprint, bool allowSha1) {

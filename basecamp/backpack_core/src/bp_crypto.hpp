@@ -40,6 +40,7 @@ inline Bytes unb64url(const std::string& s) {
     for (char c : s) { if (c == '=') break; int v = val(c); if (v < 0) throw Err("not base64url"); acc = acc << 6 | v; bits += 6; if (bits >= 8) { bits -= 8; o.push_back((acc >> bits) & 255); } }
     return o;
 }
+inline std::string b64std(const Bytes& b) { std::string s = b64url(b); for (auto& c : s) { if (c == '-') c = '+'; else if (c == '_') c = '/'; } while (s.size() % 4) s += '='; return s; }
 inline std::string hex(const unsigned char* p, size_t n) { static const char* H = "0123456789abcdef"; std::string o; for (size_t i = 0; i < n; i++) { o += H[p[i] >> 4]; o += H[p[i] & 15]; } return o; }
 inline Bytes sha256(const unsigned char* p, size_t n) { Bytes d(32); SHA256(p, n, d.data()); return d; }
 inline std::string sha256hex(const std::string& s) { auto d = sha256((const unsigned char*)s.data(), s.size()); return hex(d.data(), 32); }

@@ -1,12 +1,13 @@
 // backpack_core_impl.cpp - see backpack_core_impl.h and docs/adr/0011-basecamp-app.md.
 #include "backpack_core_impl.h"
 #include "bp_fdroid.hpp"
+#include "bp_keys.hpp"
 #include "qrcodegen.hpp"
 #include <cstdlib>
 
 using bp::json;
 namespace {
-const char* VERSION = "0.1.0";
+const char* VERSION = "0.2.0";
 std::string ok(json j = json::object()) { j["ok"] = true; return j.dump(); }
 std::string fail(const std::string& why) { return json{{"ok", false}, {"error", why}}.dump(); }
 json qrMatrix(const std::string& text) {
@@ -24,6 +25,25 @@ void BackpackCoreImpl::onContextReady() {
     if (const char* d = std::getenv("BACKPACK_DIR")) m_dataDir = d;
     else if (const char* h = std::getenv("HOME")) m_dataDir = std::string(h) + "/.backpack";
     else m_dataDir = ".backpack";
+    loadPrefs();
+}
+
+// app preferences beside the repos: the last Storage node used (a suggestion, never a default in code)
+void BackpackCoreImpl::loadPrefs() {
+    try { json p = json::parse(bp::readFile(m_dataDir + "/backpack-app.json")); m_lastNode = p.value("lastNode", ""); } catch (...) {}
+}
+void BackpackCoreImpl::savePrefs() {
+    try { std::error_code ec; bp::fs::create_directories(m_dataDir, ec); bp::writeFileAtomic(m_dataDir + "/backpack-app.json", json{{"lastNode", m_lastNode}}.dump(2), 0644); } catch (...) {}
+}
+
+std::string BackpackCoreImpl::testNode(std::string url) {
+    if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) return fail("The node's REST address starts with http:// or https://");
+    // a blocking HTTP call: run it on a short-lived thread so the module thread never waits on the network
+    json res; std::thread([&]() {
+        try { json ni = bp::Node{url}.info(); res = json{{"ok", true}, {"peerId", ni["peerId"]}, {"addrs", ni["addrs"]}, {"warning", bp::nodeWarning(url)}}; }
+        catch (std::exception& e) { res = json{{"ok", false}, {"error", std::string("No answer from that node: ") + e.what()}}; }
+    }).join();
+    return res.dump();
 }
 
 std::string BackpackCoreImpl::version() { return json{{"ok", true}, {"version", VERSION}}.dump(); }
@@ -63,14 +83,19 @@ std::string BackpackCoreImpl::snapshot() {
         jobs.push_back(json{{"id", j.id}, {"kind", j.kind}, {"repo", j.repo}, {"state", j.state}, {"error", j.error}, {"log", log},
                             {"progress", json{{"what", j.progressWhat}, {"done", j.done}, {"total", j.total}}}, {"result", j.result.empty() ? json() : json::parse(j.result, nullptr, false)}});
     }
-    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"repos", repos}, {"jobs", jobs}});
+    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}});
 }
 
-std::string BackpackCoreImpl::createRepo(std::string slug, std::string name, std::string privateFlag) {
+std::string BackpackCoreImpl::createRepo(std::string slug, std::string name, std::string privateFlag, std::string node) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!validSlug(slug)) return fail("A short id: letters, digits, - and _ (it names the folder)");
     if (name.empty() || name.size() > 100) return fail("Give the repo a name (at most 100 characters)");
-    try { bp::Repo r = bp::Repo::create(repoDir(slug), name, privateFlag == "1", ""); return ok(json{{"repo", r.summary()}}); }
+    if (!node.empty() && node.rfind("http://", 0) != 0 && node.rfind("https://", 0) != 0) return fail("The Storage node is its REST address: http(s)://...");
+    try {
+        bp::Repo r = bp::Repo::create(repoDir(slug), name, privateFlag == "1", node);
+        if (!node.empty()) { m_lastNode = node; savePrefs(); }
+        return ok(json{{"repo", r.summary()}});
+    }
     catch (std::exception& e) { return fail(e.what()); }
 }
 
@@ -112,7 +137,7 @@ std::string BackpackCoreImpl::configure(std::string slug, std::string patchJson)
     try {
         json p = json::parse(patchJson);
         bp::Repo r = bp::Repo::load(repoDir(slug));
-        if (p.contains("node")) { std::string n = p["node"]; if (n.rfind("http://", 0) != 0 && n.rfind("https://", 0) != 0) return fail("The Storage node is an http(s) URL"); r.s["node"] = n; }
+        if (p.contains("node")) { std::string n = p["node"]; if (n.rfind("http://", 0) != 0 && n.rfind("https://", 0) != 0) return fail("The Storage node is an http(s) URL"); r.s["node"] = n; m_lastNode = n; savePrefs(); }
         if (p.contains("name")) { std::string n = p["name"]; if (n.empty() || n.size() > 100) return fail("A name of 1-100 characters"); r.s["name"] = n; }
         for (auto side : {"Get", "Put"}) {
             std::string k = std::string("pointers") + side;
@@ -170,12 +195,51 @@ std::string BackpackCoreImpl::startJob(const std::string& kind, const std::strin
 
 std::string BackpackCoreImpl::addApk(std::string slug, std::string apkPath) {
     if (apkPath.rfind("file://", 0) == 0) apkPath = apkPath.substr(7);
-    std::string dir = repoDir(slug);
-    return startJob("add", slug, [this, dir, apkPath](Job& j) {
+    std::string dir = repoDir(slug), signDir = m_dataDir + "/signing";
+    return startJob("add", slug, [this, dir, signDir, apkPath](Job& j) {
         BP_JOB_REPO(dir)
-        bool added = r.addApk(apkPath);
+        std::string path = apkPath; bp::TempDir t;
+        {   // unsigned (no v2/v3 block): sign it with the package's key, if this computer has one
+            bp::Zip z(apkPath);
+            bool signedApk = z.cdOffset >= 16 && std::string((const char*)&z.data[z.cdOffset - 16], 16) == "APK Sig Block 42";
+            if (!signedApk) {
+                const bp::Zip::Entry* me = z.find("AndroidManifest.xml"); if (!me) throw bp::Err("not an APK (no AndroidManifest.xml)");
+                std::string pkg = bp::parseManifest(z.read(*me, 8u << 20)).id;
+                bp::Keys keys{signDir};
+                if (!bp::validPackage(pkg) || !keys.has(pkg)) throw bp::Err("the APK is unsigned and there is no signing key for " + pkg + " here: create or import one (Keys), or add a signed APK");
+                path = (t.p / "signed.apk").string();
+                std::string cert = bp::signApk(apkPath, path, keys.load(pkg));
+                r.log("signed with the " + pkg + " key (" + cert.substr(0, 8) + "...)");
+            }
+        }
+        bool added = r.addApk(path);
         return json{{"added", added}}.dump();
     });
+}
+
+std::string BackpackCoreImpl::keys() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    try { return ok(json{{"keys", bp::Keys{m_dataDir + "/signing"}.list()}}); } catch (std::exception& e) { return fail(e.what()); }
+}
+std::string BackpackCoreImpl::createKey(std::string package, std::string name) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!bp::validPackage(package)) return fail("Give the app's package name, like org.example.app");
+    try { std::string cert; std::thread([&]() { cert = bp::Keys{m_dataDir + "/signing"}.create(package, name); }).join();   // RSA-4096 keygen takes a moment
+          return ok(json{{"package", package}, {"cert", cert}, {"note", "Export a backup now: without this key no update of the app can ever be published"}}); }
+    catch (std::exception& e) { return fail(e.what()); }
+}
+std::string BackpackCoreImpl::importKey(std::string package, std::string p12Path, std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!bp::validPackage(package)) return fail("Give the app's package name, like org.example.app");
+    if (p12Path.rfind("file://", 0) == 0) p12Path = p12Path.substr(7);
+    try { return ok(json{{"package", package}, {"cert", bp::Keys{m_dataDir + "/signing"}.importP12(package, p12Path, password)}}); }
+    catch (std::exception& e) { return fail(e.what()); }
+}
+std::string BackpackCoreImpl::exportKey(std::string package, std::string p12Path, std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (p12Path.rfind("file://", 0) == 0) p12Path = p12Path.substr(7);
+    try { bp::Keys{m_dataDir + "/signing"}.exportP12(package, p12Path, password); return ok(json{{"path", p12Path}}); }
+    catch (std::exception& e) { return fail(e.what()); }
 }
 
 std::string BackpackCoreImpl::publish(std::string slug, std::string force) {

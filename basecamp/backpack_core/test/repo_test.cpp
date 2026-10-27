@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
             bp::Repo r = bp::Repo::load(d); r.log = [](const std::string& m) { std::cout << m << "\n"; };
             auto v = r.verify(true); std::cout << "verify ok=" << v["ok"] << "\n"; return v["ok"] ? 0 : 1;
         }
-        bp::Repo r = bp::fs::exists(d / "repo.json") ? bp::Repo::load(d) : bp::Repo::create(d, std::string("app test ") + argv[2], std::string(argv[3]) == "1", "");
+        bp::Repo r = bp::fs::exists(d / "repo.json") ? bp::Repo::load(d) : bp::Repo::create(d, std::string("app test ") + argv[2], std::string(argv[3]) == "1", "http://[fdb0:9afc:a5ef:f167:7ad7:68b7:aca0:b9fa]:8480");
         r.log = [](const std::string& m) { std::cout << m << "\n"; };
         for (int i = 4; i < argc; i++) r.addApk(argv[i]);
         std::cout << r.publish(false).dump() << "\n";

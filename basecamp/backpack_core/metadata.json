@@ -2,7 +2,7 @@
   "name": "backpack_core",
   "display_name": "Backpack Core",
   "icon": "icon.png",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "core",
   "interface": "universal",
   "category": "tools",
