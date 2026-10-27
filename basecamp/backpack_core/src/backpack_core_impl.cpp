@@ -113,7 +113,7 @@ std::string BackpackCoreImpl::link(std::string slug) {
         bp::Repo r = bp::Repo::load(repoDir(slug));
         if (!r.s.contains("lastLink")) return fail("Publish the repo once: the link names its first index");
         std::string l = r.s["lastLink"];
-        return ok(json{{"link", l}, {"private", !r.readKey().empty()}, {"qr", qrMatrix(l)}});
+        return ok(json{{"link", l}, {"private", !r.readKey().empty() && !r.isMembers()}, {"members", r.isMembers()}, {"qr", qrMatrix(l)}});
     } catch (std::exception& e) { return fail(e.what()); }
 }
 
