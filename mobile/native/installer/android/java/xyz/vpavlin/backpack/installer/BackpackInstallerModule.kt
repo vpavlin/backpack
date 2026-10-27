@@ -124,9 +124,8 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
           }
           require(last) { "truncated: no last chunk" }
         }
-        val final = File(dst)
-        final.delete()
-        if (!out.renameTo(final)) throw IllegalStateException("could not move the decrypted file into place")
+        // rename(2) replaces dst atomically; no delete first, so a failed rename keeps the old dst (audit N-3)
+        if (!out.renameTo(File(dst))) throw IllegalStateException("could not move the decrypted file into place")
         promise.resolve(written.toDouble())
       } catch (t: Throwable) { out.delete(); promise.reject("decrypt", t.message ?: "failed") }
     }.start()

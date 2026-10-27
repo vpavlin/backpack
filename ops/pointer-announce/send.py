@@ -41,7 +41,8 @@ def b64u(s):
 
 
 def read_pointer(d, name):
-    """Return the file's text if it is a valid signed pointer for the key in its name, else raise."""
+    """Return the file's text if it is a valid signed pointer, else raise: a public pointer must be signed by
+    the key in its name; an encrypted one by the repo key it carries (its name is a topic id, audit N-2)."""
     key = name[:-5]
     if not name.endswith(".json") or not KEY_RE.match(key):
         raise ValueError("not a repo-key (or read-key id) file name")

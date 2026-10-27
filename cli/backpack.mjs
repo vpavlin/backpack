@@ -35,7 +35,12 @@ const repoName = opt("repo", "default");
 const dir = path.join(os.homedir(), ".backpack", repoName);
 const stateFile = path.join(dir, "repo.json"), keyFile = path.join(dir, "key.pem");
 const die = (m) => { console.error(`backpack: ${m}`); process.exit(1); };
-const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "backpack-"));
+// every temp dir lives under one per-run dir, removed when the process exits, errors included (audit N-5)
+let runTmp = null;
+const tmpDir = () => {
+  if (!runTmp) { runTmp = fs.mkdtempSync(path.join(os.tmpdir(), "backpack-")); process.on("exit", () => fs.rmSync(runTmp, { recursive: true, force: true })); }
+  return fs.mkdtempSync(path.join(runTmp, "t-"));
+};
 
 function latestBuildTools() {
   const bt = path.join(os.homedir(), "Android/Sdk/build-tools");
@@ -90,10 +95,15 @@ async function withTemp(bytes, fn) {
   const d = tmpDir(), t = path.join(d, "f"); fs.writeFileSync(t, bytes);
   try { return await fn(t); } finally { fs.rmSync(d, { recursive: true, force: true }); }
 }
-async function download(node, cid) {
+async function download(node, cid, max = Infinity) {
   for (const p of [`/api/storage/v1/data/${cid}`, `/api/storage/v1/data/${cid}/network/stream`]) {
     const r = await fetch(`${node}${p}`);
-    if (r.ok) return Buffer.from(await r.arrayBuffer());
+    if (!r.ok) continue;
+    if (max === Infinity) return Buffer.from(await r.arrayBuffer());
+    // capped: stop reading as soon as it's too big, instead of buffering a hostile node's answer (audit N-4)
+    const parts = []; let n = 0;
+    for await (const c of r.body) { n += c.length; if (n > max) { r.body.cancel?.().catch?.(() => {}); throw new Error(`over ${max} bytes`); } parts.push(c); }
+    return Buffer.concat(parts);
   }
   throw new Error(`node can't serve ${cid}`);
 }
@@ -187,7 +197,7 @@ async function init() {
   const { privateKey } = generateKeyPairSync("ed25519");
   fs.writeFileSync(keyFile, privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
   const priv = flag("private");
-  fs.writeFileSync(stateFile, JSON.stringify({ name, node, seq: 0, pointers: { get: [], put: [] }, apps: {}, ...(priv ? { readKey: newKey() } : {}) }, null, 2), { mode: 0o600 });
+  save({ name, node, seq: 0, pointers: { get: [], put: [] }, apps: {}, ...(priv ? { readKey: newKey() } : {}) });   // temp+rename (audit N-5)
   console.log(`repo "${name}" created in ${dir}\nkey ${pubOf()}\nnode ${node}\nback up ${keyFile}: without it this repo can never publish again`);
   if (priv) console.log(`private: the read key is in ${stateFile} and in every link this repo prints; pointer id ${topicId(load().readKey)}`);
 }
@@ -452,8 +462,7 @@ async function verifyCmd() {
   }
   let body;
   try {
-    const raw = await download(node, best.index);
-    if (raw.length > 1 << 20) throw new Error(`${raw.length} bytes, over the 1 MiB a phone accepts`);   // audit PR-10
+    const raw = await download(node, best.index, 1 << 20);   // the 1 MiB a phone accepts (audit PR-10, N-4)
     body = openEnvelope(JSON.parse(raw.toString("utf8")), key, "index", readKey);
     console.log(`✓ index ${best.index} (from ${best.from}): "${body.name}" v${body.v} seq ${body.seq ?? 0}, ${body.apps.length} apps, signed ${body.created}`);
     if (best.seq >= 0 && (body.seq ?? 0) !== best.seq) bad(`index seq ${body.seq} ≠ pointer seq ${best.seq}`);

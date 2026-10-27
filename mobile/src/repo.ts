@@ -167,7 +167,8 @@ export async function addFromLink(link: string, repos: Repo[], onStage?: (s: str
     try {
       const n = await refresh({ ...base, readKey: rk }, onStage);
       // opened as plaintext: a read key proved nothing; keep only one that was proven before
-      next = rk && !n.encrypted ? { ...n, readKey: known?.encrypted ? known.readKey : undefined } : n;
+      // (a key from before 0.2.14 has no `encrypted` flag: keep it too; audit N-1)
+      next = rk && !n.encrypted ? { ...n, readKey: known?.readKey && known.readKey !== rk ? known.readKey : known?.encrypted ? known.readKey : undefined } : n;
       break;
     } catch (e: any) {
       lastErr = e;
