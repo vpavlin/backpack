@@ -93,6 +93,9 @@ export function peer(x: unknown, i = 0): Peer {
 function version(x: unknown, where: string): Version {
   const v = x as any;
   if (!v || typeof v !== "object") fail(where);
+  // a private file has both its key and its ciphertext size, never one alone (audit PR-6)
+  if ((v.fk === undefined) !== (v.csize === undefined)) fail(`${where}: file key and encrypted size come together`);
+  if (v.csize !== undefined && !(Number.isInteger(v.csize) && Number.isInteger(v.size) && v.csize > v.size)) fail(`${where}: encrypted size must exceed the size`);
   return {
     versionCode: int(v.versionCode, `${where} versionCode`, 1, 2 ** 31 - 1),
     versionName: str(v.versionName, 100, `${where} versionName`)!,
@@ -117,6 +120,7 @@ function app(x: unknown, i: number): App {
   const label = str(a.label, 100, `${id} label`)!;
   if (!label.trim()) fail(`${id} has an empty label`);
   const versions = arr(a.versions, LIMITS.versions, `${id} versions`, (v, j) => version(v, `${id} version ${j}`));
+  if ((a.iconKey === undefined) !== (a.iconCsize === undefined)) fail(`${id}: icon key and encrypted size come together`);
   if (!versions.length) fail(`${id} has no versions`);
   return {
     id, label, versions,

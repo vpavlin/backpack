@@ -167,6 +167,12 @@ export async function getFile(cid: string, path: string, peers: Peer[], onStage?
   // download survives this app being closed, and one cache serves every app. Else our own node.
   if (await loamAvailable()) {
     try { return await getViaLoam(cid, path, peers, onStage, onProgress, size); }
+    catch (e: any) {
+      // Loam caps one file at 512 MiB; an encrypted file is a little bigger than its APK (audit PR-7).
+      // That one refusal falls back to our own node; any other error stands.
+      if (!/too large/i.test(String(e?.message ?? e))) throw e;
+      diag(`loam refused ${cid.slice(-10)} as too large: using our own node`);
+    }
     finally { viaLoam.delete(cid); }
   }
   const c = await init(peers.map((p) => p.spr ?? "").filter(Boolean));

@@ -83,12 +83,14 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
 
   // ── private repos (ADR 0009): bpe1 chunked AES-256-GCM files ───────────────────
   // "BPE1" ‖ chunk size u32 BE ‖ nonce prefix(8) ‖ chunk*, chunk = GCM(fileKey, prefix ‖ u32 BE index,
-  // aad = [1 if last else 0]) ‖ tag(16). Streams src → dst (flat memory); any bad tag, a missing last
-  // chunk or data after it deletes dst and rejects. Resolves the plaintext byte count.
+  // aad = [1 if last else 0]) ‖ tag(16). Streams src → dst.part (flat memory) and renames it to dst only
+  // when every chunk checked, so a kill mid-way never leaves a partial dst (audit PR-4). The header isn't
+  // authenticated, so only the one chunk size Backpack writes is accepted (audit PR-5). Resolves the
+  // plaintext byte count.
   @ReactMethod
   fun decryptFile(src: String, dst: String, keyB64u: String, promise: Promise) {
     Thread {
-      val out = File(dst)
+      val out = File("$dst.part")
       try {
         val key = android.util.Base64.decode(keyB64u, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
         require(key.size == 32) { "bad file key" }
@@ -100,13 +102,12 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
           val head = ByteArray(16)
           require(readFully(inp, head) == 16 && String(head, 0, 4, Charsets.US_ASCII) == "BPE1") { "not a Backpack encrypted file" }
           val chunk = ((head[4].toInt() and 255) shl 24) or ((head[5].toInt() and 255) shl 16) or ((head[6].toInt() and 255) shl 8) or (head[7].toInt() and 255)
-          require(chunk in 1..(16 shl 20)) { "bad chunk size" }
+          require(chunk == 1 shl 20) { "unexpected chunk size $chunk" }
           val prefix = head.copyOfRange(8, 16)
           val buf = ByteArray(chunk + 16)
           var off = 16L; var i = 0; var last = false
           out.outputStream().buffered(1 shl 16).use { os ->
             while (off < total) {
-              require(!last) { "data after the last chunk" }
               val len = minOf((chunk + 16).toLong(), total - off).toInt()
               require(len >= 16) { "truncated chunk" }
               require(readFully(inp, buf, len) == len) { "short read" }
@@ -123,6 +124,9 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
           }
           require(last) { "truncated: no last chunk" }
         }
+        val final = File(dst)
+        final.delete()
+        if (!out.renameTo(final)) throw IllegalStateException("could not move the decrypted file into place")
         promise.resolve(written.toDouble())
       } catch (t: Throwable) { out.delete(); promise.reject("decrypt", t.message ?: "failed") }
     }.start()

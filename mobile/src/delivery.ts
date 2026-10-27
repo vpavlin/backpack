@@ -28,7 +28,9 @@ export const topicFor = (id: string) => `/backpack/1/${id}/json`;
 const readKeys = new Map<string, string>();         // repo key → read key (private repos)
 /** Tell Delivery a repo's read key (private repos), before watch/loaded need it. */
 export function know(key: string, readKey?: string) { if (readKey) readKeys.set(key, readKey); else readKeys.delete(key); }
-const topicOf = (key: string) => topicFor(readKeys.has(key) ? topicId(readKeys.get(key)!) : key);
+// A private repo listens on BOTH topics (audit PR-1): its read key's, and the repo key's, so a read key
+// that turns out wrong (or a publisher that published one plaintext note) can't silently cut it off.
+const topicsOf = (key: string) => readKeys.has(key) ? [topicFor(topicId(readKeys.get(key)!)), topicFor(key)] : [topicFor(key)];
 const joined = new Set<string>();                   // topics joined on the node
 
 let state: "off" | "starting" | "on" | "unavailable" = "off";
@@ -68,8 +70,15 @@ function save(key: string, text: string | null) {
 }
 
 function receive(topic: string, candidates: Uint8Array[]): boolean {
-  const key = [...keys].find((k) => topicOf(k) === topic);
-  if (!key || !Array.isArray(candidates)) return false;
+  // every repo listening on this topic gets a try (audit PR-3: two repos may share a read key)
+  const owners = [...keys].filter((k) => topicsOf(k).includes(topic));
+  if (!owners.length || !Array.isArray(candidates)) return false;
+  let any = false;
+  for (const key of owners) if (receiveFor(key, candidates)) any = true;
+  return any;
+}
+
+function receiveFor(key: string, candidates: Uint8Array[]): boolean {
   for (const c of candidates.slice(0, MAX_CANDIDATES)) {
     if (!c || c.length > MAX_BYTES) continue;
     try {
@@ -109,7 +118,7 @@ export async function watch(repos: { key: string; readKey?: string }[], cb: (p: 
   repos.forEach((r) => know(r.key, r.readKey));
   await loaded();
   repos.forEach((r) => keys.add(r.key));
-  const fresh = [...keys].filter((k) => !joined.has(topicOf(k)));
+  const unjoined = () => [...new Set([...keys].flatMap(topicsOf))].filter((t) => !joined.has(t));
   if (state === "starting") return;                   // joined right after start() (audit R-9)
   if (state === "unavailable") {                     // Loam may have appeared since: retry, at most once a minute
     if (Date.now() - unavailableAt < 60_000) return;
@@ -117,18 +126,19 @@ export async function watch(repos: { key: string; readKey?: string }[], cb: (p: 
   }
   try {
     if (state === "on") {
-      if (fresh.length) { await T.join(fresh.map(topicOf)); fresh.forEach((k) => joined.add(topicOf(k))); pull(); }
+      const fresh = unjoined();
+      if (fresh.length) { await T.join(fresh); fresh.forEach((t) => joined.add(t)); pull(); }
       return;
     }
     state = "starting"; listeningSince = Date.now();
     // must come before anything that wires the transport backend (loam-integrate-app §2)
     T.preferServiceBackend(true, APP_ID);
-    const startedWith = new Set(keys);
-    await T.start({ deviceId: await deviceId(), topics: [...startedWith].map(topicOf), onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
-    startedWith.forEach((k) => joined.add(topicOf(k)));
+    const startedWith = unjoined();
+    await T.start({ deviceId: await deviceId(), topics: startedWith, onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
+    startedWith.forEach((t) => joined.add(t));
     state = "on"; lastError = "";
-    const late = [...keys].filter((k) => !startedWith.has(k));   // repos added while the node was starting
-    if (late.length) { await T.join(late.map(topicOf)); late.forEach((k) => joined.add(topicOf(k))); }
+    const late = unjoined();   // repos added while the node was starting
+    if (late.length) { await T.join(late); late.forEach((t) => joined.add(t)); }
     storage.diag(`delivery: listening on ${keys.size} repo topic(s) via ${T.usingServiceBackend() ? "Loam" : "own node"}`);
     pull();
   } catch (e: any) {

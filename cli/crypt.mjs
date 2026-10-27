@@ -72,11 +72,10 @@ export function decryptBuffer(data, fileKey) {
   const key = keyBytes(fileKey);
   if (data.length < 16 || !data.subarray(0, 4).equals(MAGIC)) throw new Error("not a Backpack encrypted file");
   const chunk = data.readUInt32BE(4), prefix = data.subarray(8, 16);
-  if (chunk < 1 || chunk > 16 << 20) throw new Error("bad chunk size");
+  if (chunk !== CHUNK) throw new Error(`unexpected chunk size ${chunk}`);   // the header isn't authenticated (audit PR-5)
   const out = [];
   let off = 16, i = 0, last = false;
   while (off < data.length) {
-    if (last) throw new Error("data after the last chunk");
     const len = Math.min(chunk + TAG, data.length - off);
     if (len < TAG) throw new Error("truncated chunk");
     last = off + len === data.length;

@@ -45,7 +45,12 @@ function latestBuildTools() {
   } catch { return ""; }
 }
 function load() { if (!fs.existsSync(stateFile)) die(`no repo "${repoName}" — run: backpack init --name "…"`); return JSON.parse(fs.readFileSync(stateFile, "utf8")); }
-function save(s) { fs.writeFileSync(stateFile, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.chmodSync(stateFile, 0o600); }   // holds a private repo's read key
+// holds a private repo's read key: mode 600, written to a temp file and renamed, so a crash can't leave
+// half a repo.json (audit PR-13)
+function save(s) {
+  const t = `${stateFile}.tmp`;
+  fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.chmodSync(t, 0o600); fs.renameSync(t, stateFile);
+}
 function privKey() { return createPrivateKey(fs.readFileSync(keyFile)); }
 function pubOf() { return createPublicKey(privKey()).export({ format: "jwk" }).x; }
 const sha256hex = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -74,10 +79,16 @@ async function upload(node, file, name, mime) {
 // ciphertext size are recorded next to the CID and published only inside the encrypted index.
 async function uploadMaybeEnc(s, file, name, mime) {
   if (!s.readKey) return { cid: await upload(s.node, file, name, mime) };
-  const t = path.join(tmpDir(), "enc.bpe");
-  const { key, size } = encryptFile(file, t);
-  try { return { cid: await upload(s.node, t, `${name}.bpe`, "application/octet-stream"), fk: key, csize: size }; }
-  finally { fs.rmSync(t, { force: true }); }
+  const d = tmpDir(), t = path.join(d, "enc.bpe");
+  try {
+    const { key, size } = encryptFile(file, t);
+    return { cid: await upload(s.node, t, `${name}.bpe`, "application/octet-stream"), fk: key, csize: size };
+  } finally { fs.rmSync(d, { recursive: true, force: true }); }
+}
+/** A temp file holding `bytes`, removed (with its directory) after `fn`, also on errors (audit PR-13). */
+async function withTemp(bytes, fn) {
+  const d = tmpDir(), t = path.join(d, "f"); fs.writeFileSync(t, bytes);
+  try { return await fn(t); } finally { fs.rmSync(d, { recursive: true, force: true }); }
 }
 async function download(node, cid) {
   for (const p of [`/api/storage/v1/data/${cid}`, `/api/storage/v1/data/${cid}/network/stream`]) {
@@ -351,15 +362,11 @@ async function encryptLeftovers(s) {
       process.stdout.write(`${a.id} ${v.versionName}: encrypting… `);
       const bytes = await download(s.node, v.cid);
       if (sha256hex(bytes) !== v.sha256) die(`${a.id} ${v.versionName}: the node's copy doesn't match the pinned SHA-256`);
-      const t = path.join(tmpDir(), "plain"); fs.writeFileSync(t, bytes);
-      const up = await uploadMaybeEnc(s, t, `${a.id}_${v.versionCode}.apk`, "application/octet-stream");
-      fs.rmSync(t, { force: true });
+      const up = await withTemp(bytes, (t) => uploadMaybeEnc(s, t, `${a.id}_${v.versionCode}.apk`, "application/octet-stream"));
       Object.assign(v, { cid: up.cid, fk: up.fk, csize: up.csize, blockSize: blockSizeFor(up.csize) }); n++; save(s); console.log(up.cid);
     }
     if (a.icon && !a.iconKey) {
-      const t = path.join(tmpDir(), "icon"); fs.writeFileSync(t, await download(s.node, a.icon));
-      const up = await uploadMaybeEnc(s, t, `${a.id}.icon`, "application/octet-stream");
-      fs.rmSync(t, { force: true });
+      const up = await withTemp(await download(s.node, a.icon), (t) => uploadMaybeEnc(s, t, `${a.id}.icon`, "application/octet-stream"));
       Object.assign(a, { icon: up.cid, iconKey: up.fk, iconCsize: up.csize }); n++; save(s);
     }
   }
@@ -412,6 +419,7 @@ async function publish() {
   const link = `backpack://repo?${q}`;
   s.lastLink = link; save(s);
   console.log(`seq ${seq}\nindex ${cid}\n\n${link}\n`);
+  if (s.readKey) console.log("This link (and the QR) carries the READ KEY: whoever has it can read the repo. Don't paste it into logs, issues or chats you don't control. (audit PR-8)\n");
   try {
     const QR = (await import("qrcode")).default;
     const png = path.join(dir, "repo-qr.png");
@@ -444,7 +452,9 @@ async function verifyCmd() {
   }
   let body;
   try {
-    body = openEnvelope(JSON.parse((await download(node, best.index)).toString("utf8")), key, "index", readKey);
+    const raw = await download(node, best.index);
+    if (raw.length > 1 << 20) throw new Error(`${raw.length} bytes, over the 1 MiB a phone accepts`);   // audit PR-10
+    body = openEnvelope(JSON.parse(raw.toString("utf8")), key, "index", readKey);
     console.log(`✓ index ${best.index} (from ${best.from}): "${body.name}" v${body.v} seq ${body.seq ?? 0}, ${body.apps.length} apps, signed ${body.created}`);
     if (best.seq >= 0 && (body.seq ?? 0) !== best.seq) bad(`index seq ${body.seq} ≠ pointer seq ${best.seq}`);
   } catch (e) { bad(`index ${best.index}: ${e.message}`); }

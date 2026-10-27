@@ -1,6 +1,6 @@
 # 0009. Private repos: a read key in the link
 
-**Status:** accepted, implemented (2026-10-27): CLI 5405fa2, app 0.2.13; emulator-verified with the lab repo
+**Status:** accepted, implemented (2026-10-27): CLI 5405fa2, app 0.2.13; emulator-verified with the lab repo. Audited 2026-10-27 (proteus/auditor, PR-1..PR-13), fixes in 0.2.14.
 
 ## Context
 
@@ -67,7 +67,10 @@ signing key. Whoever holds the read key can read the repo; nobody else can.
 - Delivery listens on the read-key topic; the web pointer is fetched from `<t>.json`.
 - Downloads go to `<path>.bpe`, then the native module decrypts to `<path>` and deletes the ciphertext;
   then the same checks as before.
-- An older Backpack given a private link fails with "not a Backpack index", which is honest enough.
+- An older Backpack given a private link fails to read the encrypted index (a JSON parse error), and keeps
+  showing nothing new.
+- A link's read key is a candidate until it decrypts the repo's index; only then is it stored. The phone
+  listens on the read key's topic AND the repo key's, and tries every repo on a shared topic (audit PR-1, PR-3).
 
 ## What this doesn't do
 
@@ -77,7 +80,21 @@ signing key. Whoever holds the read key can read the repo; nobody else can.
 - **Metadata.** Sizes of the ciphertexts, publish times, and (for relay operators) which repo key
   publishes when are visible.
 - **The link is the secret.** Anyone who sees it can read the repo, and it can be forwarded. Treat it like
-  a password; the QR the CLI prints is the same secret.
+  a password; the QR the CLI prints is the same secret, and so is `lastLink` in repo.json and the CLI's
+  output (keep it out of CI logs).
+- **Converting a public repo keeps its past public.** The old plaintext indexes, APKs and the old pointer
+  file stay on Storage and the web: whoever had the old link can still read everything published before
+  the switch. Only what is published after it is private.
+- **No forward secrecy.** One read key opens every index it encrypted; a key that leaks later opens the
+  repo's whole past under that key. Rotating limits the damage to what was published under the old key.
+- **The repo key is visible.** Encrypted pointers carry the repo key in the clear (for relays), so anyone
+  watching a topic learns which repo publishes on it, and successive read keys of one repo are linkable.
+- **Keys at rest.** The read key is in repo.json (mode 600) on the publisher's box and in the app's storage
+  on phones; neither is encrypted at rest.
+- **A plaintext envelope is still accepted** when it verifies (that's how a public repo works). A private
+  repo stays private only while it is published with this CLI, which always encrypts once `--private` is set.
+- **Files at the 512 MiB edge.** Encryption adds 16 bytes per MiB; a file that no longer fits Loam's
+  per-file cap is fetched with Backpack's own Storage node instead (audit PR-7).
 
 ## Later: membership instead of a shared link
 

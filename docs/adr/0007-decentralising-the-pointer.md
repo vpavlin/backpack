@@ -48,7 +48,8 @@ the highest valid `seq` from all of them.
 - Backpack takes on loam-transport as a dependency, and the Loam app on the phone.
 - RLN: one pointer per publish plus one re-send a day per repo is far below any tier (see the RLN
   traffic study).
-- The `u=` link parameter stays for HTTP sources; the Delivery topic is derived from `k=`, so links
+- The `u=` link parameter stays for HTTP sources; the Delivery topic is derived from `k=` (for a private
+  repo, ADR 0009, from the read key `x=`; the phone listens on both), so links
   need no change.
 
 ## Implementation (2026-10-23)

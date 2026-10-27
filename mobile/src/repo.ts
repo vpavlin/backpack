@@ -27,6 +27,7 @@ export interface Repo {
   sources?: Source[];      // what each pointer source said at the last check
   via?: string;            // the source of the pointer the current index came from
   readKey?: string;        // private repo (ADR 0009): from the link's x=; reads the index, pointers and file keys
+  encrypted?: boolean;     // the index we hold was encrypted (proves readKey: audit PR-1)
 }
 export interface Source { name: string; seq?: number; error?: string }
 
@@ -130,7 +131,8 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
   const dir = await storage.filesDir();
   const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress, { max: LIMITS.indexBytes });
   if (!raw) throw new Error("the index is empty or larger than 1 MB: refusing");
-  const index = validateIndex(openEnvelope(JSON.parse(raw), repo.key, "index", repo.readKey), repo.key);
+  const env = JSON.parse(raw);
+  const index = validateIndex(openEnvelope(env, repo.key, "index", repo.readKey), repo.key);
   const seq = index.seq;
   if (seq < have) throw new Error(`this index is older than the one you have (seq ${seq} < ${have}): refusing`);
   if (expectSeq !== null && seq !== expectSeq) throw new Error(`index seq ${seq} doesn't match its pointer (${expectSeq})`);
@@ -140,7 +142,7 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
     peers: index.nodes.length ? index.nodes : repo.peers,
     pointers: uniq([...(repo.pointers ?? []), ...index.pointers]).slice(0, LIMITS.pointers),
     loadedCid: cid, fetchedAt: now, checkedAt: now, error: undefined, sources,
-    via: expectSeq !== null ? via : repo.via ?? "link",
+    via: expectSeq !== null ? via : repo.via ?? "link", encrypted: !!env?.enc,
   };
 }
 
@@ -154,15 +156,25 @@ export async function addFromLink(link: string, repos: Repo[], onStage?: (s: str
   const known = repos.find((x) => x.key === r.key);
   // the link's index CID IS used (audit R-1): the index is signed and its seq can't go below ours, so a
   // newer link moves the repo forward and an older one is refused; only unsigned extras are ignored
-  // A read key in the link is taken too: it can't redirect anything (the index is still checked against
-  // the repo key), it only lets the phone read a repo that went private (ADR 0009).
-  const merged: Repo = known ? { ...known, indexCid: r.indexCid, ...(r.readKey ? { readKey: r.readKey } : {}) } : r;
-  let next: Repo;
-  try { next = await refresh(merged, onStage); }
-  catch (e: any) {
-    if (known && /older than the one you have/.test(String(e?.message))) next = { ...known, pointers: merged.pointers, ...(merged.readKey ? { readKey: merged.readKey } : {}) };  // keep the newer one
-    else throw e;
+  // A read key in the link (ADR 0009) is only a CANDIDATE (audit PR-1): it is kept only once it has
+  // decrypted this repo's index. A wrong key would otherwise move the repo to a Delivery topic nobody
+  // publishes on. Tried in order: the link's key, the key we already had, none. The index is re-read
+  // (loadedCid cleared) so the proof is fresh.
+  const base: Repo = known ? { ...known, indexCid: r.indexCid, loadedCid: undefined } : { ...r, readKey: undefined };
+  const candidates = [...new Set([r.readKey, known?.readKey, undefined])];
+  let next: Repo | undefined, lastErr: any;
+  for (const rk of candidates) {
+    try {
+      const n = await refresh({ ...base, readKey: rk }, onStage);
+      // opened as plaintext: a read key proved nothing; keep only one that was proven before
+      next = rk && !n.encrypted ? { ...n, readKey: known?.encrypted ? known.readKey : undefined } : n;
+      break;
+    } catch (e: any) {
+      lastErr = e;
+      if (known && /older than the one you have/.test(String(e?.message))) { next = known; break; }   // keep the newer one, and its key
+    }
   }
+  if (!next) throw lastErr;
   const out = [...repos.filter((x) => x.key !== r.key), next];
   await saveRepos(out);
   return out;

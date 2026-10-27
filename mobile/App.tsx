@@ -106,7 +106,7 @@ function Main() {
     R.loadRepos().then((rs) => {
       const known = rs.find((x) => x.key === r.key);
       Alert.alert(known ? `Update "${known.name}"?` : `Add "${r.name}"?`,
-        `${known ? "You already have this repository; Backpack will check it for a newer list." : "Only add repositories from people you trust: Backpack will offer the apps it lists."}\n\nPublisher key\n${r.key}`,
+        `${known ? "You already have this repository; Backpack will check it for a newer list." : "Only add repositories from people you trust: Backpack will offer the apps it lists."}${r.readKey ? "\n\n🔒 This is a private repository link: it carries the key that reads it. Keep it to yourself." : ""}\n\nPublisher key\n${r.key}`,
         [{ text: "Cancel", style: "cancel" }, { text: known ? "Check" : "Add", onPress: () => add(l) }]);
     });
   };

@@ -2,15 +2,22 @@
 """Announce Backpack repo pointers over Logos Delivery (backpack ADR 0007).
 
 The pointer files are the signed envelopes `backpack publish` uploads to /srv/data/{public,unlisted}/backpack/
-<repo key>.json. Each is sent verbatim to /backpack/1/<repo key>/json through a logosctl session's
-delivery_module, where phones (the Loam shared node) receive it live and fleet Store keeps it for catch-up.
+<id>.json. Each is sent verbatim to /backpack/1/<id>/json through a logosctl session's delivery_module,
+where phones (the Loam shared node) receive it live and fleet Store keeps it for catch-up.
+<id> is the repo key for a public repo; for a private repo (ADR 0009) it is the read key's topic id, and
+the envelope is encrypted.
 
 Runs as root (the logosctl session is root's), so after the 2026-10-23 audit (BP-2) it trusts nothing
 in the directory:
   - only regular files, never symlinks; opened with O_NOFOLLOW;
-  - the file name must be a repo key (43 base64url chars) + ".json"; at most 4 KiB;
-  - the content must be a pointer envelope whose ed25519 signature verifies with the key in the file
-    name, and whose body names that same key. Anything else is skipped and reported, never sent;
+  - the file name must be 43 base64url chars + ".json"; at most 4 KiB;
+  - a public pointer must verify with the key in the file name, and its body must name that key;
+  - an encrypted (private) pointer is verified with the repo key it carries in the clear (`key`): this box
+    has no read key, so it can't tie the file name (the topic id) to that key. Whoever can write into the
+    pointer directories can therefore send a validly signed private pointer to ANY topic, or shadow one
+    (audit PR-2). Phones still reject anything the repo didn't sign, so it can't forge an update, only
+    misroute or withhold one. Keep the directories writable by the publisher (root) only;
+  - anything else is skipped and reported, never sent;
   - logosctl is called without a shell.
 
 Usage: send.py [KEY ...]   (no args: every pointer file; the timer does that twice a day so Store keeps them)

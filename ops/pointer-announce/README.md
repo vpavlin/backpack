@@ -18,7 +18,9 @@ Check what Store holds: `delivery_module storeQuery` against a logos.test store 
 
 **Hardening (audit BP-2, 2026-10-23).** It runs as root, so it trusts nothing in the directory: only regular
 files (no symlinks, opened with `O_NOFOLLOW`), only `<43-char key>.json` names, at most 4 KiB, and only
-content that is a pointer envelope whose ed25519 signature verifies with the key in the file name and
+content that is a pointer envelope whose ed25519 signature verifies with the key in the file name (for an
+encrypted private-repo pointer, ADR 0009: with the repo key it carries, since the file is named by the read
+key's topic id; so the directories must stay root-only, see send.py, audit PR-2) and
 whose body names that key. Everything else is skipped and logged. logosctl is called without a shell.
 Needs `python3-cryptography`. Keep the pointer directories root-owned and writable only by the publisher.
 

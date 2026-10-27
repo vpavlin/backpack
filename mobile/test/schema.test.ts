@@ -23,6 +23,13 @@ throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [] }] 
 throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], label: null }] }, K), "a null label (BP-4)");
 throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [{ ...ver, signer: undefined }] }] }, K), "a version without a signer (BP-6)");
 throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], id: "../../../shared_prefs/backpack" }] }, K), "a traversal package id (BP-7)");
+// private repos (ADR 0009, audit PR-6): a file key and its encrypted size come together
+const FK = "A".repeat(43);   // a dummy file key
+ok(!!validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [{ ...ver, fk: FK, csize: 58 }] }] }, K), "an encrypted version validates");
+throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [{ ...ver, fk: FK }] }] }, K), "a file key without its encrypted size (PR-6)");
+throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [{ ...ver, csize: 58 }] }] }, K), "an encrypted size without its key (PR-6)");
+throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [{ ...ver, fk: FK, csize: 8 }] }] }, K), "an encrypted size below the size (PR-6)");
+throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], iconKey: FK }] }, K), "an icon key without its size (PR-6)");
 throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], versions: [{ ...ver, versionCode: "../.." }] }] }, K), "a string versionCode (BP-7)");
 throws(() => validateIndex({ ...good, apps: [{ ...good.apps[0], icon: "../x" }] }, K), "a non-CID icon (BP-7)");
 throws(() => validateIndex({ key: K, seq: 2, index: CID, created: "x" }, K), "a pointer body as an index (BP-4)");
