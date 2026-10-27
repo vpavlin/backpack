@@ -62,6 +62,5 @@ private:
     std::string m_dataDir;
     std::map<int, std::shared_ptr<Job>> m_jobs;
     std::map<std::string, int> m_busyRepo;
-    std::vector<std::thread> m_threads;
     int m_nextJob = 1;
 };

@@ -7,3 +7,4 @@ probe/latecb
 probe/phonepath
 probe/phonepath1540
 *.so
+basecamp/*/result*
