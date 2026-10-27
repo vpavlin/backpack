@@ -2,7 +2,8 @@
 // fetch + verify the signed index from Logos Storage, remember repos, verify + install APKs.
 // Security model: docs/adr/0002-security-model.md; updates: docs/adr/0003-updates-signed-pointer.md.
 //
-// Link: backpack://repo?i=<indexCID>&k=<ed25519 key, b64url>&n=<name>&p=<peerId>&a=<addr>…&s=<spr>&u=<pointer url>…
+// Link: backpack://repo?i=<indexCID>&k=<ed25519 key, b64url>&n=<name>&p=<peerId>&a=<addr>…&s=<spr>&u=<pointer url>…[&x=<read key>]
+// A private repo (ADR 0009) adds x=: its read key. The index, pointers and files are encrypted with it.
 // Envelope: {"backpack":1,["kind":"pointer",]"body":"<json>","sig":"<b64url ed25519 over body>"}
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { openEnvelope } from "./envelope";
@@ -11,6 +12,7 @@ import { NativeModules } from "react-native";
 import * as storage from "./storage";
 import * as delivery from "./delivery";
 import * as settings from "./settings";
+import { isReadKey } from "./crypt";
 import { LIMITS, isCid, isKey, peer as checkPeer, safePointerUrl, validateIndex, validatePointer } from "./schema";
 import type { App, Index, Peer, Pointer, Version } from "./schema";
 export type { App, Index, Pointer, Version };
@@ -24,6 +26,7 @@ export interface Repo {
   index?: Index; loadedCid?: string; fetchedAt?: string; checkedAt?: string; error?: string;
   sources?: Source[];      // what each pointer source said at the last check
   via?: string;            // the source of the pointer the current index came from
+  readKey?: string;        // private repo (ADR 0009): from the link's x=; reads the index, pointers and file keys
 }
 export interface Source { name: string; seq?: number; error?: string }
 
@@ -45,7 +48,9 @@ export function parseLink(link: string): Repo {
   catch (e: any) { throw new Error(`the link's node is malformed (${e?.message ?? e})`); }
   const name = (p.get("n") ?? "Backpack").slice(0, 100);
   const pointers = p.getAll("u").slice(0, LIMITS.pointers).map(safePointerUrl).filter((u): u is string => !!u);
-  return { key: k, name, indexCid: i, peers: [node], pointers, seq: 0 };
+  const x = p.get("x");
+  if (x !== null && !isReadKey(x)) throw new Error("the link's read key is malformed");
+  return { key: k, name, indexCid: i, peers: [node], pointers, seq: 0, ...(x ? { readKey: x } : {}) };
 }
 
 /** Stored repos are re-checked on load: an index that no longer validates is dropped (the repo stays,
@@ -58,6 +63,7 @@ export async function loadRepos(): Promise<Repo[]> {
   for (const r of raw) {
     if (!r || !isKey(r.key)) continue;
     const repo: Repo = { ...r, name: typeof r.name === "string" ? r.name.slice(0, 100) : "Backpack", peers: Array.isArray(r.peers) ? r.peers.slice(0, LIMITS.nodes) : [] };
+    if (repo.readKey !== undefined && !isReadKey(repo.readKey)) delete repo.readKey;
     if (repo.index) {
       try { repo.index = validateIndex(repo.index, repo.key); }
       catch (e: any) { repo.index = undefined; repo.loadedCid = undefined; repo.error = String(e?.message ?? e); }
@@ -76,6 +82,7 @@ export async function saveRepos(r: Repo[]) { await AsyncStorage.setItem(KEY, JSO
 export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null; via?: string; sources: Source[] }> {
   const sources: Source[] = [];
   const cands: { p: Pointer; name: string }[] = [];
+  delivery.know(repo.key, repo.readKey);
   await delivery.loaded();   // a saved note counts too (one we couldn't follow last time)
   const d = delivery.pointerFor(repo.key), ds = delivery.status();
   if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
@@ -91,7 +98,7 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
       if (r.url && r.url !== url && !safePointerUrl(r.url)) throw new Error("redirected to a non-public address: refusing");   // R-3
       const text = await r.text();
       if (text.length > 8192) throw new Error("too large for a pointer");
-      const p = validatePointer(openEnvelope(JSON.parse(text), repo.key, "pointer"), repo.key);
+      const p = validatePointer(openEnvelope(JSON.parse(text), repo.key, "pointer", repo.readKey), repo.key);
       storage.diag(`pointer ${name}: seq ${p.seq}`);
       sources.push({ name, seq: p.seq }); cands.push({ p, name });
     } catch (e: any) {
@@ -123,7 +130,7 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
   const dir = await storage.filesDir();
   const raw = await storage.getFile(cid, `${dir}/indexes/${cid}.json`, peers, onStage, 0, onProgress, { max: LIMITS.indexBytes });
   if (!raw) throw new Error("the index is empty or larger than 1 MB: refusing");
-  const index = validateIndex(openEnvelope(JSON.parse(raw), repo.key, "index"), repo.key);
+  const index = validateIndex(openEnvelope(JSON.parse(raw), repo.key, "index", repo.readKey), repo.key);
   const seq = index.seq;
   if (seq < have) throw new Error(`this index is older than the one you have (seq ${seq} < ${have}): refusing`);
   if (expectSeq !== null && seq !== expectSeq) throw new Error(`index seq ${seq} doesn't match its pointer (${expectSeq})`);
@@ -147,11 +154,13 @@ export async function addFromLink(link: string, repos: Repo[], onStage?: (s: str
   const known = repos.find((x) => x.key === r.key);
   // the link's index CID IS used (audit R-1): the index is signed and its seq can't go below ours, so a
   // newer link moves the repo forward and an older one is refused; only unsigned extras are ignored
-  const merged: Repo = known ? { ...known, indexCid: r.indexCid } : r;
+  // A read key in the link is taken too: it can't redirect anything (the index is still checked against
+  // the repo key), it only lets the phone read a repo that went private (ADR 0009).
+  const merged: Repo = known ? { ...known, indexCid: r.indexCid, ...(r.readKey ? { readKey: r.readKey } : {}) } : r;
   let next: Repo;
   try { next = await refresh(merged, onStage); }
   catch (e: any) {
-    if (known && /older than the one you have/.test(String(e?.message))) next = { ...known, pointers: merged.pointers };  // keep the newer one
+    if (known && /older than the one you have/.test(String(e?.message))) next = { ...known, pointers: merged.pointers, ...(merged.readKey ? { readKey: merged.readKey } : {}) };  // keep the newer one
     else throw e;
   }
   const out = [...repos.filter((x) => x.key !== r.key), next];
@@ -163,6 +172,11 @@ export async function iconPath(repo: Repo, app: App): Promise<string | null> {
   if (!app.icon || !isCid(app.icon)) return null;
   const path = `${await storage.filesDir()}/icons/${app.icon}.img`;
   if ((await storage.fileSize(path)) > 0) return path;
+  if (app.iconKey) {   // private repo: the icon is encrypted under its own key (ADR 0009)
+    await storage.getFile(app.icon, `${path}.bpe`, repo.peers, undefined, 0, undefined, { max: LIMITS.iconBytes + (1 << 16) });
+    try { await Installer.decryptFile(`${path}.bpe`, path, app.iconKey); } finally { await Installer.deleteFile(`${path}.bpe`); }
+    return path;
+  }
   await storage.getFile(app.icon, path, repo.peers, undefined, 0, undefined, { max: LIMITS.iconBytes });   // capped before download (R-5)
   return path;
 }
@@ -233,8 +247,16 @@ export async function install(repo: Repo, app: App, v: Version, onStage: (s: str
   if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("this version doesn't pin a signing key: refusing to install it");   // BP-6
   const have = await storage.fileSize(path);
   if (have !== v.size) {
-    try { await storage.getFile(v.cid, path, repo.peers, onStage, v.size, onProgress, { exact: v.size }); }
-    catch (e) { if (storage.isCancelled(e)) { await Installer.deleteFile(path); return "download-cancelled"; } throw e; }
+    // private repo (ADR 0009): download the ciphertext next to it, then decrypt natively (chunked, flat memory)
+    const enc = !!(v.fk && v.csize), dl = enc ? `${path}.bpe` : path;
+    try { await storage.getFile(v.cid, dl, repo.peers, onStage, enc ? v.csize! : v.size, onProgress, { exact: enc ? v.csize! : v.size }); }
+    catch (e) { if (storage.isCancelled(e)) { await Installer.deleteFile(dl); return "download-cancelled"; } throw e; }
+    if (enc) {
+      onStage("decrypting");
+      try { await Installer.decryptFile(dl, path, v.fk); }
+      catch (e: any) { throw new Error(`the APK couldn't be decrypted: ${e?.message ?? e}`); }
+      finally { await Installer.deleteFile(dl); }
+    }
   }
   onStage("checking");
   const sha = await Installer.sha256(path);

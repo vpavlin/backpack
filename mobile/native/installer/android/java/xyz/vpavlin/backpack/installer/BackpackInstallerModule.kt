@@ -18,6 +18,10 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.uimanager.ViewManager
 import java.io.File
 import java.security.MessageDigest
+import javax.crypto.AEADBadTagException
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Installs an APK that Backpack fetched from Logos Storage, through Android's PackageInstaller
@@ -76,6 +80,59 @@ class BackpackInstallerModule(private val rc: ReactApplicationContext) : ReactCo
 
   @ReactMethod
   fun deleteFile(path: String, promise: Promise) { promise.resolve(File(path).delete()) }
+
+  // ── private repos (ADR 0009): bpe1 chunked AES-256-GCM files ───────────────────
+  // "BPE1" ‖ chunk size u32 BE ‖ nonce prefix(8) ‖ chunk*, chunk = GCM(fileKey, prefix ‖ u32 BE index,
+  // aad = [1 if last else 0]) ‖ tag(16). Streams src → dst (flat memory); any bad tag, a missing last
+  // chunk or data after it deletes dst and rejects. Resolves the plaintext byte count.
+  @ReactMethod
+  fun decryptFile(src: String, dst: String, keyB64u: String, promise: Promise) {
+    Thread {
+      val out = File(dst)
+      try {
+        val key = android.util.Base64.decode(keyB64u, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+        require(key.size == 32) { "bad file key" }
+        val sk = SecretKeySpec(key, "AES")
+        val inFile = File(src)
+        val total = inFile.length()
+        var written = 0L
+        inFile.inputStream().buffered(1 shl 16).use { inp ->
+          val head = ByteArray(16)
+          require(readFully(inp, head) == 16 && String(head, 0, 4, Charsets.US_ASCII) == "BPE1") { "not a Backpack encrypted file" }
+          val chunk = ((head[4].toInt() and 255) shl 24) or ((head[5].toInt() and 255) shl 16) or ((head[6].toInt() and 255) shl 8) or (head[7].toInt() and 255)
+          require(chunk in 1..(16 shl 20)) { "bad chunk size" }
+          val prefix = head.copyOfRange(8, 16)
+          val buf = ByteArray(chunk + 16)
+          var off = 16L; var i = 0; var last = false
+          out.outputStream().buffered(1 shl 16).use { os ->
+            while (off < total) {
+              require(!last) { "data after the last chunk" }
+              val len = minOf((chunk + 16).toLong(), total - off).toInt()
+              require(len >= 16) { "truncated chunk" }
+              require(readFully(inp, buf, len) == len) { "short read" }
+              last = off + len == total
+              val nonce = ByteArray(12); prefix.copyInto(nonce)
+              nonce[8] = (i ushr 24).toByte(); nonce[9] = (i ushr 16).toByte(); nonce[10] = (i ushr 8).toByte(); nonce[11] = i.toByte()
+              val c = Cipher.getInstance("AES/GCM/NoPadding")
+              c.init(Cipher.DECRYPT_MODE, sk, GCMParameterSpec(128, nonce))
+              c.updateAAD(byteArrayOf(if (last) 1 else 0))
+              val plain = try { c.doFinal(buf, 0, len) } catch (e: AEADBadTagException) { throw IllegalStateException("chunk $i can't be decrypted (wrong key, damaged or truncated)") }
+              os.write(plain); written += plain.size
+              off += len; i++
+            }
+          }
+          require(last) { "truncated: no last chunk" }
+        }
+        promise.resolve(written.toDouble())
+      } catch (t: Throwable) { out.delete(); promise.reject("decrypt", t.message ?: "failed") }
+    }.start()
+  }
+
+  private fun readFully(inp: java.io.InputStream, b: ByteArray, n: Int = b.size): Int {
+    var got = 0
+    while (got < n) { val r = inp.read(b, got, n - got); if (r < 0) break; got += r }
+    return got
+  }
 
   // ── signing certificates (ADR 0002) ─────────────────────────────────────────
   // SHA-256 of each signing certificate, lowercase hex — what `apksigner --print-certs` calls the

@@ -12,8 +12,9 @@ const KEY = /^[A-Za-z0-9_-]{43}$/;                        // ed25519 public key,
 const PEER = /^[1-9A-HJ-NP-Za-km-z]{40,80}$/;             // libp2p peer id (base58)
 
 export interface Peer { peerId: string; addrs: string[]; spr?: string }
-export interface Version { versionCode: number; versionName: string; size: number; sha256: string; signer: string; cid: string; minSdk: number; abis: string[]; added?: string; blockSize?: number }
-export interface App { id: string; label: string; summary?: string; description?: string; license?: string; source?: string; icon: string | null; versions: Version[] }
+// fk/csize, iconKey/iconCsize: a private repo's file key and ciphertext size (ADR 0009)
+export interface Version { versionCode: number; versionName: string; size: number; sha256: string; signer: string; cid: string; minSdk: number; abis: string[]; added?: string; blockSize?: number; fk?: string; csize?: number }
+export interface App { id: string; label: string; summary?: string; description?: string; license?: string; source?: string; icon: string | null; iconKey?: string; iconCsize?: number; versions: Version[] }
 export interface Index { v: number; name: string; key: string; seq: number; created: string; nodes: Peer[]; pointers: string[]; apps: App[] }
 export interface Pointer { key: string; seq: number; index: string; created: string; nodes: Peer[] }
 
@@ -103,6 +104,8 @@ function version(x: unknown, where: string): Version {
     abis: arr(v.abis ?? [], 8, `${where} abis`, (a) => match(a, /^[a-z0-9_-]{2,20}$/, `${where} abi`)),
     added: str(v.added, 40, `${where} added`, true),
     blockSize: v.blockSize === undefined ? undefined : int(v.blockSize, `${where} blockSize`, 4096, 1 << 20),
+    fk: v.fk === undefined ? undefined : match(v.fk, KEY, `${where} file key`),
+    csize: v.csize === undefined ? undefined : int(v.csize, `${where} encrypted size`, 32, (1 << 30) + (1 << 16)),
   };
 }
 
@@ -122,6 +125,8 @@ function app(x: unknown, i: number): App {
     license: str(a.license, 100, `${id} license`, true),
     source: httpUrl(a.source),
     icon: a.icon === null || a.icon === undefined ? null : match(a.icon, CID, `${id} icon`),
+    iconKey: a.iconKey === undefined ? undefined : match(a.iconKey, KEY, `${id} icon key`),
+    iconCsize: a.iconCsize === undefined ? undefined : int(a.iconCsize, `${id} icon encrypted size`, 32, LIMITS.iconBytes + (1 << 16)),
   };
 }
 

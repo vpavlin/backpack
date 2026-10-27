@@ -1,6 +1,6 @@
 # 0009. Private repos: a read key in the link
 
-**Status:** accepted (2026-10-27), being implemented
+**Status:** accepted, implemented (2026-10-27): CLI 5405fa2, app 0.2.13; emulator-verified with the lab repo
 
 ## Context
 

@@ -59,7 +59,7 @@ function Main() {
   const updatingRef = useRef(false);
   const lastRefresh = useRef(0);
   // Live pointers over Logos Delivery (ADR 0007): a newer seq than we hold → refresh (and auto-update).
-  const listen = (rs: R.Repo[]) => delivery.watch(rs.map((r) => r.key), async (p) => {
+  const listen = (rs: R.Repo[]) => delivery.watch(rs.map((r) => ({ key: r.key, readKey: r.readKey })), async (p) => {
     const known = (await R.loadRepos()).find((r) => r.key === p.key);
     if (!known) return;                     // a removed repo (audit BP-21)
     const have = known.seq ?? 0;
@@ -302,7 +302,7 @@ function Main() {
             <Pressable onPress={() => toggleFold(r.key)} onLongPress={() => remove(r)} style={s.repoHead}>
               <Text style={s.repoName}>{folded[r.key] ? "▸ " : "▾ "}{r.name}</Text>
               <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps${folded[r.key] ? (() => { const n = r.index!.apps.filter((a) => (installed[a.id] ?? -1) >= 0 && (installed[a.id] ?? -1) < (a.versions[0]?.versionCode ?? 0)).length; return n ? ` (${n} update${n > 1 ? "s" : ""})` : ""; })() : ""} · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
-              <Text style={s.repoKey}>publisher key {keyShort(r.key)}</Text>
+              <Text style={s.repoKey}>{r.readKey ? "🔒 private · " : ""}publisher key {keyShort(r.key)}</Text>
               {!!r.sources?.length && (
                 <Text style={s.repoKey}>
                   {r.via ? `#${r.seq ?? 0} came from ${r.via} · ` : ""}

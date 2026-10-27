@@ -10,6 +10,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as T from "./lib/loam-transport";
 import { openEnvelope } from "./envelope";
+import { topicId } from "./crypt";
 import * as storage from "./storage";
 import { validatePointer } from "./schema";
 import type { Pointer } from "./schema";
@@ -22,7 +23,13 @@ const MIN_TRIGGER_MS = 30_000;                     // at most one refresh trigge
 const lastTrigger = new Map<string, number>();
 
 const APP_ID = "xyz.vpavlin.backpack";
-export const topicFor = (key: string) => `/backpack/1/${key}/json`;
+export const topicFor = (id: string) => `/backpack/1/${id}/json`;
+// A private repo's notes travel under its read key's id, not the repo key (ADR 0009).
+const readKeys = new Map<string, string>();         // repo key → read key (private repos)
+/** Tell Delivery a repo's read key (private repos), before watch/loaded need it. */
+export function know(key: string, readKey?: string) { if (readKey) readKeys.set(key, readKey); else readKeys.delete(key); }
+const topicOf = (key: string) => topicFor(readKeys.has(key) ? topicId(readKeys.get(key)!) : key);
+const joined = new Set<string>();                   // topics joined on the node
 
 let state: "off" | "starting" | "on" | "unavailable" = "off";
 let lastError = "";
@@ -49,7 +56,7 @@ export function loaded(): Promise<void> {
     for (const [key, text] of Object.entries(saved)) {
       try {
         if (typeof text !== "string" || text.length > MAX_BYTES) throw new Error("bad");
-        const p = validatePointer(openEnvelope(JSON.parse(text), key, "pointer"), key);
+        const p = validatePointer(openEnvelope(JSON.parse(text), key, "pointer", readKeys.get(key)), key);
         if (!best.has(key) || p.seq > best.get(key)!.seq) { best.set(key, p); via.set(key, "saved"); }
       } catch { delete saved[key]; }
     }
@@ -61,13 +68,13 @@ function save(key: string, text: string | null) {
 }
 
 function receive(topic: string, candidates: Uint8Array[]): boolean {
-  const key = [...keys].find((k) => topicFor(k) === topic);
+  const key = [...keys].find((k) => topicOf(k) === topic);
   if (!key || !Array.isArray(candidates)) return false;
   for (const c of candidates.slice(0, MAX_CANDIDATES)) {
     if (!c || c.length > MAX_BYTES) continue;
     try {
       const text = new TextDecoder().decode(c);
-      const p = validatePointer(openEnvelope(JSON.parse(text), key, "pointer"), key);
+      const p = validatePointer(openEnvelope(JSON.parse(text), key, "pointer", readKeys.get(key)), key);
       storage.diag(`delivery: pointer ${key.slice(0, 6)} seq ${p.seq}`);
       heard.set(key, Date.now());
       const prev = best.get(key);
@@ -86,7 +93,7 @@ function receive(topic: string, candidates: Uint8Array[]): boolean {
 /** Stop caring about removed repos (audit BP-21). The transport has no unsubscribe yet, so the topic
  *  stays joined until restart, but its messages are ignored and nothing is remembered for it. */
 export function unwatch(repoKeys: string[]): void {
-  for (const k of repoKeys) { keys.delete(k); best.delete(k); via.delete(k); heard.delete(k); lastTrigger.delete(k); save(k, null); }
+  for (const k of repoKeys) { readKeys.delete(k); keys.delete(k); best.delete(k); via.delete(k); heard.delete(k); lastTrigger.delete(k); save(k, null); }
 }
 
 async function deviceId(): Promise<string> {
@@ -95,12 +102,14 @@ async function deviceId(): Promise<string> {
   return id;
 }
 
-/** Listen for the given repos' pointers. Safe to call again with more keys (joins the new topics). */
-export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promise<void> {
+/** Listen for the given repos' pointers. Safe to call again with more repos (joins the new topics; a repo
+ *  that went private moves to its read key's topic). */
+export async function watch(repos: { key: string; readKey?: string }[], cb: (p: Pointer) => void): Promise<void> {
   onPointer = cb;
+  repos.forEach((r) => know(r.key, r.readKey));
   await loaded();
-  const fresh = repoKeys.filter((k) => !keys.has(k));
-  fresh.forEach((k) => keys.add(k));
+  repos.forEach((r) => keys.add(r.key));
+  const fresh = [...keys].filter((k) => !joined.has(topicOf(k)));
   if (state === "starting") return;                   // joined right after start() (audit R-9)
   if (state === "unavailable") {                     // Loam may have appeared since: retry, at most once a minute
     if (Date.now() - unavailableAt < 60_000) return;
@@ -108,17 +117,18 @@ export async function watch(repoKeys: string[], cb: (p: Pointer) => void): Promi
   }
   try {
     if (state === "on") {
-      if (fresh.length) { await T.join(fresh.map(topicFor)); pull(); }
+      if (fresh.length) { await T.join(fresh.map(topicOf)); fresh.forEach((k) => joined.add(topicOf(k))); pull(); }
       return;
     }
     state = "starting"; listeningSince = Date.now();
     // must come before anything that wires the transport backend (loam-integrate-app §2)
     T.preferServiceBackend(true, APP_ID);
     const startedWith = new Set(keys);
-    await T.start({ deviceId: await deviceId(), topics: [...startedWith].map(topicFor), onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
+    await T.start({ deviceId: await deviceId(), topics: [...startedWith].map(topicOf), onReceive: receive, onStatus: (s) => storage.diag(`delivery: ${s}`) });
+    startedWith.forEach((k) => joined.add(topicOf(k)));
     state = "on"; lastError = "";
     const late = [...keys].filter((k) => !startedWith.has(k));   // repos added while the node was starting
-    if (late.length) await T.join(late.map(topicFor));
+    if (late.length) { await T.join(late.map(topicOf)); late.forEach((k) => joined.add(topicOf(k))); }
     storage.diag(`delivery: listening on ${keys.size} repo topic(s) via ${T.usingServiceBackend() ? "Loam" : "own node"}`);
     pull();
   } catch (e: any) {
