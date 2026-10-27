@@ -2,7 +2,8 @@
 // backpack — publish Android apps to a repository that lives in Logos Storage.
 // Design and security model: docs/adr/ (0001 repo = key, 0002 security, 0003 updates, 0004 F-Droid import).
 //
-//   backpack init --name "My backpack" [--node http://[…]:8480]
+//   backpack init --name "My backpack" [--node http://[…]:8480] [--private]
+//   backpack config … [--private] [--rotate-read-key]   private repo: a read key in the link (ADR 0009)
 //   backpack config [--node URL] [--pointer-get URL]… [--pointer-put rsync:host:/path|put:URL|exec:CMD]… [--clear-pointers]
 //   backpack add <file.apk>… [--name N --summary S --description D --license L]
 //   backpack import-fdroid <repo URL> --fingerprint <sha256> [--versions 1] [--only pkg,pkg]
@@ -14,6 +15,7 @@
 // (no auth: use one reachable only by you — the mesh or localhost).
 import { randomUUID, createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { seal, open } from "./envelope.mjs";
+import { newKey, topicId, encryptFile, decryptBuffer } from "./crypt.mjs";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -43,13 +45,13 @@ function latestBuildTools() {
   } catch { return ""; }
 }
 function load() { if (!fs.existsSync(stateFile)) die(`no repo "${repoName}" — run: backpack init --name "…"`); return JSON.parse(fs.readFileSync(stateFile, "utf8")); }
-function save(s) { fs.writeFileSync(stateFile, JSON.stringify(s, null, 2)); }
+function save(s) { fs.writeFileSync(stateFile, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.chmodSync(stateFile, 0o600); }   // holds a private repo's read key
 function privKey() { return createPrivateKey(fs.readFileSync(keyFile)); }
 function pubOf() { return createPublicKey(privKey()).export({ format: "jwk" }).x; }
 const sha256hex = (buf) => createHash("sha256").update(buf).digest("hex");
 
 // ── signed envelopes (ADR 0002) ──────────────────────────────────────────────
-const envelope = (kind, bodyObj) => seal(kind, bodyObj, privKey());
+const envelope = (kind, bodyObj, readKey) => seal(kind, bodyObj, privKey(), readKey);
 const openEnvelope = open;
 
 // ── Storage node REST ────────────────────────────────────────────────────────
@@ -67,6 +69,15 @@ async function upload(node, file, name, mime) {
   });
   if (!r.ok) die(`upload ${name}: HTTP ${r.status} ${await r.text()}`);
   return (await r.text()).trim();
+}
+// Private repos (ADR 0009): every file goes up encrypted under its own random key; the key and the
+// ciphertext size are recorded next to the CID and published only inside the encrypted index.
+async function uploadMaybeEnc(s, file, name, mime) {
+  if (!s.readKey) return { cid: await upload(s.node, file, name, mime) };
+  const t = path.join(tmpDir(), "enc.bpe");
+  const { key, size } = encryptFile(file, t);
+  try { return { cid: await upload(s.node, t, `${name}.bpe`, "application/octet-stream"), fk: key, csize: size }; }
+  finally { fs.rmSync(t, { force: true }); }
 }
 async function download(node, cid) {
   for (const p of [`/api/storage/v1/data/${cid}`, `/api/storage/v1/data/${cid}/network/stream`]) {
@@ -137,19 +148,20 @@ async function addApk(s, apk, meta = {}) {
   const prev = app.versions.find((v) => v.signer && v.versionCode !== m.versionCode);
   if (prev && prev.signer !== signer) throw new Error(`${m.id}: ${m.versionCode} is signed by ${signer.slice(0, 8)}…, earlier versions by ${prev.signer.slice(0, 8)}…; refusing`);
   process.stdout.write(`${m.id} ${m.versionName} (${m.versionCode}) ${(bytes.length / 1e6).toFixed(1)} MB → uploading… `);
-  const cid = await upload(s.node, apk, `${m.id}_${m.versionCode}.apk`, "application/vnd.android.package-archive");
-  let iconCid = app.icon;
-  if (meta.iconFile) iconCid = await upload(s.node, meta.iconFile, path.basename(meta.iconFile), meta.iconFile.endsWith(".webp") ? "image/webp" : "image/png");
-  else if (m.icon && !iconCid) {
+  const up = await uploadMaybeEnc(s, apk, `${m.id}_${m.versionCode}.apk`, "application/vnd.android.package-archive");
+  const cid = up.cid;
+  const setIcon = (u) => { app.icon = u.cid; if (u.fk) { app.iconKey = u.fk; app.iconCsize = u.csize; } else { delete app.iconKey; delete app.iconCsize; } };
+  if (meta.iconFile) setIcon(await uploadMaybeEnc(s, meta.iconFile, path.basename(meta.iconFile), meta.iconFile.endsWith(".webp") ? "image/webp" : "image/png"));
+  else if (m.icon && !app.icon) {
     const ext = m.icon.endsWith(".webp") ? "webp" : "png";
     const t = path.join(tmpDir(), `icon.${ext}`);
     fs.writeFileSync(t, execFileSync("unzip", ["-p", apk, m.icon], { maxBuffer: 16 << 20 }));
-    iconCid = await upload(s.node, t, `${m.id}.${ext}`, `image/${ext}`);
+    setIcon(await uploadMaybeEnc(s, t, `${m.id}.${ext}`, `image/${ext}`));
   }
   app.label = meta.name || app.label || m.label;
   for (const k of ["summary", "description", "license", "source"]) if (meta[k]) app[k] = meta[k];
-  app.icon = iconCid;
-  app.versions = [{ versionCode: m.versionCode, versionName: m.versionName, size: bytes.length, sha256, signer, cid, blockSize: blockSizeFor(bytes.length), minSdk: m.minSdk, abis: m.abis, added: new Date().toISOString() },
+  const enc = up.fk ? { fk: up.fk, csize: up.csize } : {};
+  app.versions = [{ versionCode: m.versionCode, versionName: m.versionName, size: bytes.length, sha256, signer, cid, blockSize: blockSizeFor(up.csize ?? bytes.length), minSdk: m.minSdk, abis: m.abis, added: new Date().toISOString(), ...enc },
     ...app.versions.filter((v) => v.versionCode !== m.versionCode)].sort((a, b) => b.versionCode - a.versionCode).slice(0, KEEP_VERSIONS);
   console.log(cid);
   return true;
@@ -163,8 +175,10 @@ async function init() {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const { privateKey } = generateKeyPairSync("ed25519");
   fs.writeFileSync(keyFile, privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
-  save({ name, node, seq: 0, pointers: { get: [], put: [] }, apps: {} });
+  const priv = flag("private");
+  fs.writeFileSync(stateFile, JSON.stringify({ name, node, seq: 0, pointers: { get: [], put: [] }, apps: {}, ...(priv ? { readKey: newKey() } : {}) }, null, 2), { mode: 0o600 });
   console.log(`repo "${name}" created in ${dir}\nkey ${pubOf()}\nnode ${node}\nback up ${keyFile}: without it this repo can never publish again`);
+  if (priv) console.log(`private: the read key is in ${stateFile} and in every link this repo prints; pointer id ${topicId(load().readKey)}`);
 }
 
 async function config() {
@@ -172,13 +186,25 @@ async function config() {
   s.pointers ??= { get: [], put: [] };
   if (flag("clear-pointers")) s.pointers = { get: [], put: [] };
   const node = opt("node", null); if (node) s.node = node;
+  // Private (ADR 0009): a read key; the pointer moves to the read key's id (web file + Delivery topic), so
+  // pointer addresses naming the repo key are rewritten. Files are re-uploaded encrypted on the next publish.
+  const rotate = flag("rotate-read-key");
+  if (flag("private") || rotate) {
+    if (rotate && !s.readKey) die("--rotate-read-key: this repo isn't private (use --private)");
+    const oldId = s.readKey ? topicId(s.readKey) : pubOf();
+    s.readKey = newKey();
+    const newId = topicId(s.readKey);
+    const swap = (u) => u.split(`${oldId}.json`).join(`${newId}.json`).split("$BACKPACK_KEY").join("$BACKPACK_ID");
+    s.pointers.get = s.pointers.get.map(swap); s.pointers.put = s.pointers.put.map(swap);
+    console.log(`read key ${rotate ? "rotated" : "created"}: pointer id ${newId}. Readers need the new link from the next publish.`);
+  }
   for (const g of optAll("pointer-get")) if (!s.pointers.get.includes(g)) s.pointers.get.push(g);
   for (const p of optAll("pointer-put")) {
     if (!/^(rsync|put|exec):/.test(p)) die(`--pointer-put must be rsync:<dest>, put:<url> or exec:<command>, got ${p}`);
     if (!s.pointers.put.includes(p)) s.pointers.put.push(p);
   }
   save(s);
-  console.log(JSON.stringify({ node: s.node, seq: s.seq ?? 0, pointers: s.pointers }, null, 2));
+  console.log(JSON.stringify({ node: s.node, seq: s.seq ?? 0, private: !!s.readKey, pointers: s.pointers }, null, 2));
 }
 
 async function add() {
@@ -315,15 +341,41 @@ async function importFdroid() {
   console.log(`${added} version(s) imported; run \`backpack publish\` to make them visible`);
 }
 
+/** Private repo: any file still in the clear (added before the repo went private) is downloaded,
+ *  checked against its pinned SHA-256 (APKs), encrypted under a new file key and uploaded again. */
+async function encryptLeftovers(s) {
+  let n = 0;
+  for (const a of Object.values(s.apps)) {
+    for (const v of a.versions) {
+      if (v.fk) continue;
+      process.stdout.write(`${a.id} ${v.versionName}: encrypting… `);
+      const bytes = await download(s.node, v.cid);
+      if (sha256hex(bytes) !== v.sha256) die(`${a.id} ${v.versionName}: the node's copy doesn't match the pinned SHA-256`);
+      const t = path.join(tmpDir(), "plain"); fs.writeFileSync(t, bytes);
+      const up = await uploadMaybeEnc(s, t, `${a.id}_${v.versionCode}.apk`, "application/octet-stream");
+      fs.rmSync(t, { force: true });
+      Object.assign(v, { cid: up.cid, fk: up.fk, csize: up.csize, blockSize: blockSizeFor(up.csize) }); n++; save(s); console.log(up.cid);
+    }
+    if (a.icon && !a.iconKey) {
+      const t = path.join(tmpDir(), "icon"); fs.writeFileSync(t, await download(s.node, a.icon));
+      const up = await uploadMaybeEnc(s, t, `${a.id}.icon`, "application/octet-stream");
+      fs.rmSync(t, { force: true });
+      Object.assign(a, { icon: up.cid, iconKey: up.fk, iconCsize: up.csize }); n++; save(s);
+    }
+  }
+  if (n) console.log(`${n} file(s) encrypted`);
+}
+
 async function publish() {
   const s = load();
   s.pointers ??= { get: [], put: [] };
+  if (s.readKey) await encryptLeftovers(s);
   const node = await nodeInfo(s.node);
   const nodesNow = [{ peerId: node.peerId, addrs: node.addrs, spr: node.spr }];
   const apps = Object.values(s.apps).sort((a, b) => a.label.localeCompare(b.label));
   // nothing changed since the last publish → no new seq (phones would just re-download the same list).
   // The SPR is left out: the node re-signs it with a new sequence number now and then.
-  const contentHash = sha256hex(Buffer.from(JSON.stringify({ name: s.name, nodes: nodesNow.map((n) => ({ peerId: n.peerId, addrs: [...n.addrs].sort() })), pointers: s.pointers.get, apps })));
+  const contentHash = sha256hex(Buffer.from(JSON.stringify({ name: s.name, readKey: s.readKey ?? null, nodes: nodesNow.map((n) => ({ peerId: n.peerId, addrs: [...n.addrs].sort() })), pointers: s.pointers.get, apps })));
   if (contentHash === s.lastContentHash && !flag("force")) {
     console.log(`nothing changed since seq ${s.seq}; not publishing (--force to publish anyway)`);
     return;
@@ -332,14 +384,14 @@ async function publish() {
   const created = new Date().toISOString();
   const nodes = nodesNow;
   if (apps.length > MAX_APPS) die(`${apps.length} apps: phones accept at most ${MAX_APPS} per repo`);
-  const index = envelope("index", { v: 2, name: s.name, key: pubOf(), seq, created, nodes, pointers: s.pointers.get, apps });
+  const index = envelope("index", { v: 2, name: s.name, key: pubOf(), seq, created, nodes, pointers: s.pointers.get, apps }, s.readKey);
   if (Buffer.byteLength(JSON.stringify(index), "utf8") > 1 << 20) die("the signed index is over 1 MB, more than a phone accepts: trim descriptions or apps");
   const t = tmpDir();
   const indexFile = path.join(t, "backpack-index.json");
   fs.writeFileSync(indexFile, JSON.stringify(index));
   const cid = await upload(s.node, indexFile, "backpack-index.json", "application/json");
   // pointer (ADR 0003): signed like the index, may live anywhere
-  const pointer = envelope("pointer", { key: pubOf(), seq, index: cid, created, nodes });
+  const pointer = envelope("pointer", { key: pubOf(), seq, index: cid, created, nodes }, s.readKey);
   const pointerFile = path.join(dir, "latest.json");
   fs.writeFileSync(pointerFile, JSON.stringify(pointer));
   s.seq = seq; s.lastIndex = cid; s.lastContentHash = contentHash;
@@ -347,7 +399,7 @@ async function publish() {
     try {
       if (target.startsWith("rsync:")) execFileSync("rsync", ["-q", "--chmod=F644", pointerFile, target.slice(6)], { stdio: "inherit" });
       // exec: any command, e.g. announcing over Logos Delivery (ADR 0007); gets the key and the file
-      else if (target.startsWith("exec:")) execFileSync("sh", ["-c", target.slice(5)], { stdio: "inherit", env: { ...process.env, BACKPACK_KEY: pubOf(), BACKPACK_POINTER: pointerFile } });
+      else if (target.startsWith("exec:")) execFileSync("sh", ["-c", target.slice(5)], { stdio: "inherit", env: { ...process.env, BACKPACK_KEY: pubOf(), BACKPACK_ID: s.readKey ? topicId(s.readKey) : pubOf(), BACKPACK_POINTER: pointerFile } });
       else { const pr = await fetch(target.slice(4), { method: "PUT", body: fs.readFileSync(pointerFile) }); if (!pr.ok) throw new Error(`HTTP ${pr.status}`); }
       console.log(`pointer → ${target}`);
     } catch (e) { console.error(`pointer push to ${target} FAILED: ${e.message}`); }
@@ -356,6 +408,7 @@ async function publish() {
   for (const a of node.addrs) q.append("a", a);
   q.set("s", node.spr);
   for (const u of s.pointers.get) q.append("u", u);
+  if (s.readKey) q.set("x", s.readKey);   // the read key: whoever has this link can read the repo (ADR 0009)
   const link = `backpack://repo?${q}`;
   s.lastLink = link; save(s);
   console.log(`seq ${seq}\nindex ${cid}\n\n${link}\n`);
@@ -370,13 +423,13 @@ async function publish() {
 // Check a repo the way a phone would: pointers → index → (deep) APKs. Exit 1 on any failure.
 async function verifyCmd() {
   const deep = flag("deep");
-  let key, indexCid, pointerUrls = [], node;
+  let key, indexCid, pointerUrls = [], node, readKey;
   if (args[0]?.startsWith("backpack://")) {
     const q = new URL(args[0].replace("backpack://", "http://x/")).searchParams;
-    key = q.get("k"); indexCid = q.get("i"); pointerUrls = q.getAll("u");
+    key = q.get("k"); indexCid = q.get("i"); pointerUrls = q.getAll("u"); readKey = q.get("x") ?? undefined;
     node = fs.existsSync(stateFile) ? load().node : DEFAULT_NODE;
   } else {
-    const s = load(); key = pubOf(); indexCid = s.lastIndex; pointerUrls = s.pointers?.get ?? []; node = s.node;
+    const s = load(); key = pubOf(); indexCid = s.lastIndex; pointerUrls = s.pointers?.get ?? []; node = s.node; readKey = s.readKey;
   }
   let fail = 0;
   const bad = (m) => { fail++; console.log(`✗ ${m}`); };
@@ -384,14 +437,14 @@ async function verifyCmd() {
   for (const u of pointerUrls) {
     try {
       const r = await fetch(u, { cache: "no-store" }); if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const b = openEnvelope(await r.json(), key, "pointer");
+      const b = openEnvelope(await r.json(), key, "pointer", readKey);
       console.log(`✓ pointer ${u}: seq ${b.seq} → ${b.index}`);
       if (b.seq > best.seq) best = { seq: b.seq, index: b.index, from: u };
     } catch (e) { bad(`pointer ${u}: ${e.message}`); }
   }
   let body;
   try {
-    body = openEnvelope(JSON.parse((await download(node, best.index)).toString("utf8")), key, "index");
+    body = openEnvelope(JSON.parse((await download(node, best.index)).toString("utf8")), key, "index", readKey);
     console.log(`✓ index ${best.index} (from ${best.from}): "${body.name}" v${body.v} seq ${body.seq ?? 0}, ${body.apps.length} apps, signed ${body.created}`);
     if (best.seq >= 0 && (body.seq ?? 0) !== best.seq) bad(`index seq ${body.seq} ≠ pointer seq ${best.seq}`);
   } catch (e) { bad(`index ${best.index}: ${e.message}`); }
@@ -402,7 +455,12 @@ async function verifyCmd() {
     for (const a of body.apps) for (const v of (Array.isArray(a?.versions) ? a.versions : (bad(`${a?.id}: versions is not a list`), []))) {
       try {
         if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("no pinned signer: phones refuse to install it");
-        const bytes = await download(node, v.cid);
+        let bytes = await download(node, v.cid);
+        if (readKey) {   // private: every file is encrypted under its own key, listed in the index
+          if (!v.fk) throw new Error("private repo, but no file key for this version");
+          if (bytes.length !== v.csize) throw new Error(`encrypted size ${bytes.length} ≠ ${v.csize}`);
+          bytes = decryptBuffer(bytes, v.fk);
+        }
         if (bytes.length !== v.size) throw new Error(`size ${bytes.length} ≠ ${v.size}`);
         if (sha256hex(bytes) !== v.sha256) throw new Error("SHA-256 mismatch");
         const t = path.join(tmpDir(), "a.apk"); fs.writeFileSync(t, bytes);
@@ -411,7 +469,7 @@ async function verifyCmd() {
         const m = badging(t);
         if (m.id !== a.id) throw new Error(`the APK is ${m.id}, the index says ${a.id}`);
         if (m.versionCode !== v.versionCode) throw new Error(`the APK is versionCode ${m.versionCode}, the index says ${v.versionCode}`);
-        console.log(`✓ ${a.id} ${v.versionName}: sha256, signer ${signer.slice(0, 8)}…, package and versionCode ok`);
+        console.log(`✓ ${a.id} ${v.versionName}: ${readKey ? "decrypted, " : ""}sha256, signer ${signer.slice(0, 8)}…, package and versionCode ok`);
         fs.rmSync(t, { force: true });
       } catch (e) { bad(`${a.id} ${v.versionName}: ${e.message}`); }
     }
@@ -425,7 +483,7 @@ async function verifyCmd() {
 async function rehost() {
   const s = load(); let n = 0;
   for (const a of Object.values(s.apps)) for (const v of a.versions) {
-    if (v.blockSize === blockSizeFor(v.size)) continue;  // already uploaded with the right block size
+    if (v.blockSize === blockSizeFor(v.csize ?? v.size) || v.fk) continue;  // right block size already (encrypted files are always fresh uploads)
     process.stdout.write(`${a.id} ${v.versionName} (${(v.size / 1e6).toFixed(1)} MB) → `);
     const bytes = await download(s.node, v.cid);
     if (sha256hex(bytes) !== v.sha256) die(`${a.id} ${v.versionName}: the node's copy doesn't match the pinned SHA-256`);
@@ -438,7 +496,7 @@ async function rehost() {
 
 function ls() {
   const s = load();
-  console.log(`${s.name}  (key ${pubOf()}, seq ${s.seq ?? 0}, node ${s.node})`);
+  console.log(`${s.name}  (key ${pubOf()}, seq ${s.seq ?? 0}, node ${s.node}${s.readKey ? `, PRIVATE, pointer id ${topicId(s.readKey)}` : ""})`);
   for (const a of Object.values(s.apps)) console.log(`  ${a.label.padEnd(20)} ${a.id.padEnd(32)} ${a.versions.map((v) => `${v.versionName}(${v.versionCode})${v.signer ? "" : "!"}`).join(", ")}`);
   if (s.pointers?.get?.length) console.log(`pointers: ${s.pointers.get.join(" ")}`);
   if (s.lastLink) console.log(`\nlast published: ${s.lastLink}`);
@@ -448,8 +506,8 @@ const cmd = args.shift();
 const run = { init, config, add, "import-fdroid": importFdroid, publish, verify: verifyCmd, rehost, ls }[cmd];
 if (!run) {
   console.log(`usage: backpack [--repo NAME] <command>
-  init --name N [--node URL]
-  config [--node URL] [--pointer-get URL]… [--pointer-put rsync:dest|put:URL|exec:CMD]… [--clear-pointers]
+  init --name N [--node URL] [--private]
+  config [--private] [--rotate-read-key] [--node URL] [--pointer-get URL]… [--pointer-put rsync:dest|put:URL|exec:CMD]… [--clear-pointers]
   add APK… [--name --summary --description --license]
   import-fdroid <repo URL> --fingerprint SHA256 [--versions N] [--only pkg,pkg] [--allow-sha1] [--allow-stale]
   publish [--force]       (skips when nothing changed)
