@@ -17,7 +17,9 @@ export interface Version { versionCode: number; versionName: string; size: numbe
 export interface App { id: string; label: string; summary?: string; description?: string; license?: string; source?: string; icon: string | null; iconKey?: string; iconCsize?: number; versions: Version[] }
 export interface Index { v: number; name: string; key: string; seq: number; created: string; nodes: Peer[]; pointers: string[]; apps: App[] }
 // keys + epoch: a member repo's key bundle (ADR 0013)
-export interface Pointer { key: string; seq: number; index: string; created: string; nodes: Peer[]; keys?: string; epoch?: number }
+/** How one joins a paid member repo (shown to a phone that isn't a member yet; the payment itself is made in Backpack on Basecamp). */
+export interface Access { via: "lez"; price?: string; periodMs?: number }
+export interface Pointer { key: string; seq: number; index: string; created: string; nodes: Peer[]; keys?: string; epoch?: number; access?: Access }
 
 class Bad extends Error {}
 const fail = (what: string): never => { throw new Bad(`invalid repository data: ${what}`); };
@@ -159,6 +161,11 @@ export function validatePointer(b: any, key: string): Pointer {
     key, seq: int(b.seq, "pointer seq"), index: match(b.index, CID, "pointer index cid"),
     created: str(b.created, 40, "pointer created")!, nodes: arr(b.nodes ?? [], LIMITS.nodes, "pointer nodes", peer),
     ...(b.keys !== undefined ? { keys: match(b.keys, CID, "pointer key bundle"), epoch: int(b.epoch, "pointer epoch", 0, 2 ** 40) } : {}),
+    ...(b.access && typeof b.access === "object" && b.access.via === "lez" ? { access: {
+      via: "lez" as const,
+      ...(typeof b.access.price === "string" && /^[0-9]{1,30}$/.test(b.access.price) ? { price: b.access.price } : {}),
+      ...(Number.isInteger(b.access.periodMs) && b.access.periodMs > 0 ? { periodMs: b.access.periodMs } : {}),
+    } } : {}),
   };
 }
 

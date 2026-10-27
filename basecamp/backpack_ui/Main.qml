@@ -1,4 +1,4 @@
-// Backpack - a Basecamp view over backpack_core (ADR 0011): the Backpack repos this computer publishes.
+// Backpack - a Basecamp view over backpack_core (ADR 0011): repos you follow (and pay for) and repos you publish.
 //
 // Pure QML: every action runs in backpack_core (callVia = logos.callModuleAsync, never a blocking call).
 // The view renders backpack_core.snapshot(), polled (fast while a job runs), and repo(slug) for the
@@ -72,6 +72,11 @@ Item {
     property bool busy: false
     property bool again: false
     readonly property bool jobRunning: { for (var i = 0; i < st.jobs.length; i++) if (st.jobs[i].state === "running") return true; return false }
+    // two sides: "subs" = repos you follow (and pay for), "repos" = repos you publish
+    property string mode: ""
+    property string selSub: ""
+    readonly property var curSub: { var l = root.st.subs || []; for (var i = 0; i < l.length; i++) if (l[i].key === root.selSub) return l[i]; return null }
+    readonly property var subJobs: { var o = []; for (var i = 0; i < st.jobs.length; i++) if (st.jobs[i].repo === "sub_" + root.selSub) o.push(st.jobs[i]); return o }
     readonly property var curJobs: { var o = []; for (var i = 0; i < st.jobs.length; i++) if (st.jobs[i].repo === root.sel) o.push(st.jobs[i]); return o }
 
     function refresh() {
@@ -82,6 +87,9 @@ Item {
             if (s && s.ok !== false) {
                 root.st = s; root.coreSeen = true; root.missed = 0
                 if (!root.sel && s.repos.length) root.sel = s.repos[0].slug
+                var subs = s.subs || []
+                if (root.mode === "") root.mode = (s.repos.length && !subs.length) ? "repos" : "subs"
+                if (!root.selSub && subs.length) root.selSub = subs[0].key
                 root.loadRepo()
             } else root.missed++
             root.busy = false
@@ -102,6 +110,19 @@ Item {
     function noteMissing() { return !!(root.cur && root.cur.members && (!root.cur.pointersGet.length || !root.cur.pointersPut.length)) }
     readonly property string noteMissingText: "No phone can read this repo yet: phones get their key from the update note, and " + (root.cur && !root.cur.pointersGet.length ? "it has no web address (Settings)." : "publish sends it nowhere (backpack config --pointer-put).")
     function lezActive(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i].paidThroughMs > Date.now()) n++; return n }
+    // a billing period in words
+    function period(ms) {
+        if (!ms) return "period"
+        var h = ms / 3600000
+        if (h < 1) return Math.round(ms / 60000) + " min"
+        if (h < 24) return h === 1 ? "hour" : h + " hours"
+        var d = h / 24
+        if (d >= 28 && d <= 31) return "month"
+        return d === 1 ? "day" : (d % 7 === 0 ? (d / 7 === 1 ? "week" : d / 7 + " weeks") : d + " days")
+    }
+    function when(ms) { return ms ? new Date(ms).toLocaleString(Qt.locale(), "yyyy-MM-dd HH:mm") : "" }
+    function terms(x) { var t = x && (x.terms || (x.access && x.access.price !== undefined ? { price: x.access.price, periodMs: x.access.periodMs } : null)); return t }
+    function deviceName(x, pk) { return (x && x.deviceNames && x.deviceNames[pk]) ? x.deviceNames[pk] : "a phone" }
     function keyShort(k) { return k ? k.slice(0, 6) + "…" + k.slice(-4) : "" }
     function mb(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " kB" }
     // Test a Storage node and show the outcome in `label`
@@ -135,6 +156,37 @@ Item {
         Text { id: bt; anchors.centerIn: parent; color: parent.tone; font.pixelSize: 11; textFormat: Text.PlainText }
     }
 
+    component ActivityPanel: Rectangle {
+        property var jobs: []
+        Layout.preferredWidth: 380; Layout.fillHeight: true; radius: 10; color: root.cSurface
+        ColumnLayout {
+            anchors.fill: parent; anchors.margins: 12; spacing: 6
+            RowLayout { T { text: "Activity"; font.bold: true; Layout.fillWidth: true } Text { text: "clear"; color: root.cFaint; font.pixelSize: 12; MouseArea { anchors.fill: parent; onClicked: root.act("clearJobs", [], "") } } }
+            Sub { visible: jobs.length === 0; text: "Publishing, imports and checks show up here." }
+            ListView {
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
+                model: jobs
+                delegate: Rectangle {
+                    width: ListView.view.width; height: jc.implicitHeight + 12; radius: 8; color: root.cRaised
+                    ColumnLayout {
+                        id: jc; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 6; spacing: 3
+                        RowLayout {
+                            T { text: modelData.kind; font.bold: true; Layout.fillWidth: true }
+                            Badge { text: modelData.state; tone: modelData.state === "done" ? root.cOk : modelData.state === "failed" ? root.cBad : root.cAccent }
+                        }
+                        ProgressBar {
+                            Layout.fillWidth: true
+                            visible: modelData.state === "running" && modelData.progress.total > 0
+                            from: 0; to: Math.max(1, modelData.progress.total); value: modelData.progress.done
+                        }
+                        Sub { visible: modelData.state === "running" && modelData.progress.total > 0; text: modelData.progress.what + " · " + root.mb(modelData.progress.done) + " / " + root.mb(modelData.progress.total) }
+                        Sub { text: modelData.log.slice(-8).join("\n"); Layout.fillWidth: true; font.family: "monospace"; font.pixelSize: 11 }
+                    }
+                }
+            }
+        }
+    }
+
     Rectangle { anchors.fill: parent; color: root.cBg }
 
     RowLayout {
@@ -149,9 +201,52 @@ Item {
                     Text { text: "🎒"; font.pixelSize: 22 }
                     T { text: "Backpack"; font.pixelSize: 20; font.bold: true; Layout.fillWidth: true }
                 }
-                Sub { text: "Your app repos on Logos Storage"; Layout.fillWidth: true }
+                RowLayout {
+                    Layout.fillWidth: true; spacing: 6
+                    visible: root.st.repos.length > 0 || root.mode === "repos"
+                    Repeater {
+                        model: [{ m: "subs", t: "Following" }, { m: "repos", t: "My repos" }]
+                        Rectangle {
+                            Layout.fillWidth: true; height: 30; radius: 6
+                            color: root.mode === modelData.m ? root.cRaised : "transparent"; border.color: root.mode === modelData.m ? root.cAccent : root.cLine
+                            T { anchors.centerIn: parent; text: modelData.t; font.pixelSize: 13; font.bold: root.mode === modelData.m }
+                            MouseArea { anchors.fill: parent; onClicked: root.mode = modelData.m }
+                        }
+                    }
+                }
+                Sub { text: root.mode === "repos" ? "Repos you publish on Logos Storage" : "Repos you follow: join paid ones and add your phones"; Layout.fillWidth: true }
                 Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
+                // followed repos
                 ListView {
+                    visible: root.mode === "subs"
+                    Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 4
+                    model: root.st.subs || []
+                    delegate: Rectangle {
+                        width: ListView.view.width; height: 58; radius: 8
+                        color: modelData.key === root.selSub ? root.cRaised : (sma.containsMouse ? Qt.darker(root.cRaised, 1.2) : "transparent")
+                        MouseArea { id: sma; anchors.fill: parent; hoverEnabled: true; onClicked: root.selSub = modelData.key }
+                        ColumnLayout {
+                            anchors.fill: parent; anchors.margins: 8; spacing: 2
+                            RowLayout {
+                                T { text: (modelData.access ? "💳 " : modelData.members ? "👥 " : "") + modelData.name; font.bold: true; elide: Text.ElideRight; wrapMode: Text.NoWrap; Layout.fillWidth: true }
+                                Rectangle { visible: !!modelData.busy; width: 8; height: 8; radius: 4; color: root.cWarn }
+                            }
+                            Sub {
+                                Layout.fillWidth: true; elide: Text.ElideRight; wrapMode: Text.NoWrap
+                                text: modelData.error ? modelData.error
+                                    : !modelData.access ? (modelData.members ? "members · added by the publisher" : "free")
+                                    : (modelData.membership && modelData.membership.found ? (modelData.membership.paidThroughMs > Date.now() ? "member until " + root.when(modelData.membership.paidThroughMs) : "expired " + root.when(modelData.membership.paidThroughMs)) : "paid · not a member")
+                            }
+                        }
+                    }
+                }
+                Sub { visible: root.mode === "subs" && !(root.st.subs || []).length; Layout.fillWidth: true; text: "Nothing yet: follow a repo with the link its publisher shared." }
+                LogosButton { visible: root.mode === "subs"; text: "+ Follow a repo"; Layout.fillWidth: true; onClicked: followDialog.open() }
+                LogosButton { visible: root.mode === "subs"; text: "Your LEZ account"; Layout.fillWidth: true; onClicked: accountDialog.show() }
+                LogosButton { visible: root.mode === "subs" && root.st.repos.length === 0; text: "Publish your own repo"; Layout.fillWidth: true; onClicked: { root.mode = "repos"; newDialog.open() } }
+                // repos you publish
+                ListView {
+                    visible: root.mode === "repos"
                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 4
                     model: root.st.repos
                     delegate: Rectangle {
@@ -168,14 +263,15 @@ Item {
                         }
                     }
                 }
-                LogosButton { text: "+ New repo"; Layout.fillWidth: true; onClicked: newDialog.open() }
-                LogosButton { text: "Signing keys"; Layout.fillWidth: true; onClicked: keysDialog.show() }
+                LogosButton { visible: root.mode === "repos"; text: "+ New repo"; Layout.fillWidth: true; onClicked: newDialog.open() }
+                LogosButton { visible: root.mode === "repos"; text: "Signing keys"; Layout.fillWidth: true; onClicked: keysDialog.show() }
                 Sub { text: root.coreSeen ? ("Repos in " + root.st.dataDir + " · core " + root.st.version) : (root.missed > 2 ? "Can't reach backpack_core" : "Connecting…"); Layout.fillWidth: true; color: !root.coreSeen && root.missed > 2 ? root.cBad : root.cFaint }
             }
         }
 
-        // ── repo page
+        // ── repo page (a repo you publish)
         Item {
+            visible: root.mode === "repos"
             Layout.fillWidth: true; Layout.fillHeight: true
             T { visible: !root.cur; anchors.centerIn: parent; color: root.cSub; text: root.st.repos.length ? "Pick a repo" : "No repos yet. Make one with + New repo, or point Backpack at the CLI's folder." }
             ColumnLayout {
@@ -257,36 +353,164 @@ Item {
                             }
                         }
                     }
+                    ActivityPanel { jobs: root.curJobs }
+                }
+            }
+        }
+
+        // ── a repo you follow
+        Item {
+            visible: root.mode === "subs"
+            Layout.fillWidth: true; Layout.fillHeight: true
+            T { visible: !root.curSub; anchors.centerIn: parent; color: root.cSub; width: 460; horizontalAlignment: Text.AlignHCenter
+                text: (root.st.subs || []).length ? "Pick a repo" : "Follow a repo with the link its publisher shared (backpack://repo?…). A paid repo is joined here: you pay with your LEZ wallet and add your phones; they get in at the publisher's next update." }
+            ColumnLayout {
+                id: subPage
+                visible: !!root.curSub
+                anchors.fill: parent; anchors.margins: 18; spacing: 12
+                readonly property var sx: root.curSub
+                readonly property var sm: sx && sx.membership ? sx.membership : null
+                readonly property bool sPaid: !!(sx && sx.access)
+                readonly property bool sActive: !!(sm && sm.found && sm.paidThroughMs > Date.now())
+                RowLayout {
+                    T { text: subPage.sx ? subPage.sx.name : ""; font.pixelSize: 22; font.bold: true }
+                    Badge { visible: subPage.sPaid; text: "💳 paid"; tone: root.cAccent }
+                    Badge { visible: !subPage.sPaid && !!(subPage.sx && subPage.sx.members); text: "👥 members"; tone: root.cAccent }
+                    Badge { visible: !subPage.sPaid && !(subPage.sx && subPage.sx.members); text: "free"; tone: root.cOk }
+                    Badge { visible: !!(subPage.sx && subPage.sx.busy); text: "working…"; tone: root.cAccent }
+                }
+                Sub { Layout.fillWidth: true; text: subPage.sx ? ("publisher key " + root.keyShort(subPage.sx.key) + (subPage.sx.seq !== undefined ? " · update #" + subPage.sx.seq : "") + (subPage.sx.checkedAt ? " · checked " + subPage.sx.checkedAt.slice(0, 16).replace("T", " ") : "")) : "" }
+                Sub { visible: !!(subPage.sx && subPage.sx.error); color: root.cBad; Layout.fillWidth: true; text: subPage.sx && subPage.sx.error ? subPage.sx.error : "" }
+                Flow {
+                    Layout.fillWidth: true; spacing: 8
+                    LogosButton { text: "Check now"; enabled: !!subPage.sx && !subPage.sx.busy; onClicked: root.act("refreshSub", [root.selSub], "Checking…") }
+                    LogosButton { text: "Copy link"; enabled: !!subPage.sx; onClicked: root.copyText(subPage.sx.link) }
+                    LogosButton { text: "Unfollow"; enabled: !!subPage.sx && !subPage.sx.busy
+                        onClicked: confirmDialog.ask("Stop following " + subPage.sx.name + "? A membership you paid for stays yours on the chain; follow the link again to manage it.", function () { root.act("unfollow", [root.selSub], "Unfollowed", function () { root.selSub = "" }) }) }
+                }
+                RowLayout {
+                    Layout.fillWidth: true; Layout.fillHeight: true; spacing: 14
                     Rectangle {
-                        Layout.preferredWidth: 380; Layout.fillHeight: true; radius: 10; color: root.cSurface
-                        ColumnLayout {
-                            anchors.fill: parent; anchors.margins: 12; spacing: 6
-                            RowLayout { T { text: "Activity"; font.bold: true; Layout.fillWidth: true } Text { text: "clear"; color: root.cFaint; font.pixelSize: 12; MouseArea { anchors.fill: parent; onClicked: root.act("clearJobs", [], "") } } }
-                            Sub { visible: root.curJobs.length === 0; text: "Publishing, imports and checks show up here." }
-                            ListView {
-                                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
-                                model: root.curJobs
-                                delegate: Rectangle {
-                                    width: ListView.view.width; height: jc.implicitHeight + 12; radius: 8; color: root.cRaised
-                                    ColumnLayout {
-                                        id: jc; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 6; spacing: 3
-                                        RowLayout {
-                                            T { text: modelData.kind; font.bold: true; Layout.fillWidth: true }
-                                            Badge { text: modelData.state; tone: modelData.state === "done" ? root.cOk : modelData.state === "failed" ? root.cBad : root.cAccent }
-                                        }
-                                        ProgressBar {
-                                            Layout.fillWidth: true
-                                            visible: modelData.state === "running" && modelData.progress.total > 0
-                                            from: 0; to: Math.max(1, modelData.progress.total); value: modelData.progress.done
-                                        }
-                                        Sub { visible: modelData.state === "running" && modelData.progress.total > 0; text: modelData.progress.what + " · " + root.mb(modelData.progress.done) + " / " + root.mb(modelData.progress.total) }
-                                        Sub { text: modelData.log.slice(-8).join("\n"); Layout.fillWidth: true; font.family: "monospace"; font.pixelSize: 11 }
+                        Layout.fillWidth: true; Layout.fillHeight: true; radius: 10; color: root.cSurface
+                        Flickable {
+                            anchors.fill: parent; anchors.margins: 14; clip: true; contentHeight: subCol.implicitHeight
+                            ColumnLayout {
+                                id: subCol; width: parent.width; spacing: 10
+                                // not paid: how to get in
+                                Sub { visible: !subPage.sPaid; Layout.fillWidth: true; font.pixelSize: 13
+                                    text: subPage.sx && subPage.sx.members
+                                        ? "The publisher adds this repo's members by hand: send them your phone's member code (Backpack on the phone → Settings → This phone's member code → Copy link). Then open this repo's link on the phone."
+                                        : "Anyone with the link can read this repo: open it in Backpack on your phone (Copy link, or scan its QR from the publisher)." }
+                                // paid: terms + membership
+                                T { visible: subPage.sPaid; text: "Membership"; font.bold: true; font.pixelSize: 16 }
+                                Sub { visible: subPage.sPaid; Layout.fillWidth: true; font.pixelSize: 13
+                                    text: { var t = root.terms(subPage.sx); return t ? ("Costs " + t.price + " per " + root.period(t.periodMs) + ", paid from your LEZ wallet. Your phones read the repo while it's paid; when it runs out they miss the updates after that, and keep what they have.") : "" } }
+                                Sub { visible: subPage.sPaid && !(root.st.me && root.st.me.account); color: root.cWarn; Layout.fillWidth: true; text: "Set your LEZ wallet and account first (Your LEZ account), then Check now." }
+                                Sub { visible: subPage.sPaid && !!(subPage.sx && subPage.sx.membershipError); color: root.cBad; Layout.fillWidth: true; text: subPage.sx && subPage.sx.membershipError ? "Couldn't read your membership: " + subPage.sx.membershipError : "" }
+                                T { visible: subPage.sPaid && !!subPage.sm; font.pixelSize: 15
+                                    color: subPage.sActive ? root.cOk : root.cWarn
+                                    text: !subPage.sm ? "" : !subPage.sm.found ? "You're not a member yet." : subPage.sActive ? "Member until " + root.when(subPage.sm.paidThroughMs) : "Expired " + root.when(subPage.sm.paidThroughMs) + ": renew to get new updates again." }
+                                LogosButton { visible: subPage.sPaid && !!(root.st.me && root.st.me.account); enabled: !!subPage.sx && !subPage.sx.busy
+                                    text: subPage.sm && subPage.sm.found ? "Renew" : "Join"; onClicked: payDialog.show(subPage.sm && subPage.sm.found) }
+                                // devices
+                                T { visible: subPage.sPaid && !!(subPage.sm && subPage.sm.found); text: "Your devices"; font.bold: true; font.pixelSize: 16; Layout.topMargin: 8 }
+                                Sub { visible: subPage.sPaid && !!(subPage.sm && subPage.sm.found); Layout.fillWidth: true
+                                    text: "The phones that read this repo with your membership. A new one gets in at the publisher's next update (it publishes by itself when someone joins, usually within minutes); one you take off is shut out the same way." }
+                                Repeater {
+                                    model: subPage.sPaid && subPage.sm && subPage.sm.found ? subPage.sm.devices : []
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        ColumnLayout { Layout.fillWidth: true; spacing: 1
+                                            T { text: root.deviceName(subPage.sx, modelData); font.bold: true }
+                                            Sub { text: "key " + root.keyShort(modelData) } }
+                                        LogosButton { Layout.preferredWidth: 110; text: "Take off"; enabled: !!subPage.sx && !subPage.sx.busy
+                                            onClicked: { var pk = modelData; confirmDialog.ask("Take " + root.deviceName(subPage.sx, pk) + " off your membership? It can't read updates after the publisher's next one.", function () { root.act("removeMyDevice", [root.selSub, pk], "Taking it off…") }) } }
                                     }
                                 }
+                                Sub { visible: subPage.sPaid && !!(subPage.sm && subPage.sm.found) && subPage.sm.devices.length === 0; text: "No devices: add a phone below." }
+                                RowLayout {
+                                    visible: subPage.sPaid && !!(subPage.sm && subPage.sm.found); Layout.fillWidth: true
+                                    DField { id: addPhone; placeholderText: "a phone's member code: backpack://member?pk=…" }
+                                    LogosButton { Layout.preferredWidth: 110; text: "Add"; enabled: addPhone.text.indexOf("backpack://member?") === 0 && !!subPage.sx && !subPage.sx.busy
+                                        onClicked: root.act("addMyDevice", [root.selSub, addPhone.text.trim()], "Adding the phone…", function () { addPhone.text = "" }) }
+                                }
+                                Sub { visible: subPage.sPaid; Layout.fillWidth: true; color: root.cFaint
+                                    text: "A phone's member code: Backpack on the phone → Settings → This phone's member code → Copy link. On the phone, open this repo's link too (Copy link above)." }
                             }
                         }
                     }
+                    ActivityPanel { jobs: root.subJobs }
                 }
+            }
+        }
+    }
+
+    // ── follow a repo
+    Popup {
+        id: followDialog; modal: true; anchors.centerIn: parent; width: 600; padding: 18
+        background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        onOpened: fLink.text = ""
+        ColumnLayout {
+            width: parent.width; spacing: 10
+            T { text: "Follow a repo"; font.bold: true; font.pixelSize: 17 }
+            Sub { Layout.fillWidth: true; text: "Paste the repo's link (backpack://repo?…) as its publisher shared it." }
+            DField { id: fLink; placeholderText: "backpack://repo?…" }
+            RowLayout {
+                Item { Layout.fillWidth: true }
+                LogosButton { text: "Cancel"; onClicked: followDialog.close() }
+                LogosButton { text: "Follow"; enabled: fLink.text.trim().indexOf("backpack://repo?") === 0
+                    onClicked: root.act("follow", [fLink.text.trim()], "Reading the repo's update note…", function () { followDialog.close() }) }
+            }
+        }
+    }
+
+    // ── the user's LEZ wallet and paying account
+    Popup {
+        id: accountDialog; modal: true; anchors.centerIn: parent; width: 620; padding: 18
+        background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        function show() { aWallet.text = root.st.me && root.st.me.wallet ? root.st.me.wallet : ""; aAcct.text = root.st.me && root.st.me.account ? root.st.me.account : ""; open() }
+        ColumnLayout {
+            width: parent.width; spacing: 10
+            T { text: "Your LEZ account"; font.bold: true; font.pixelSize: 17 }
+            Sub { Layout.fillWidth: true; text: "Memberships are paid from this account. Backpack signs with the wallet in this folder; it never shows or copies its keys. The wallet's own settings decide which sequencer it talks to." }
+            Sub { text: "Wallet folder" }
+            DField { id: aWallet; placeholderText: "/home/you/.lee-wallet" }
+            Sub { text: "Account id (as the wallet shows it)" }
+            DField { id: aAcct; placeholderText: "base58, as the LEZ Wallet app shows it" }
+            Sub { Layout.fillWidth: true; color: root.cWarn; text: "Memberships are public on the chain: anyone can see that this account pays for a repo and how many devices it has." }
+            RowLayout {
+                Item { Layout.fillWidth: true }
+                LogosButton { text: "Cancel"; onClicked: accountDialog.close() }
+                LogosButton { text: "Save"; enabled: aWallet.text.trim().length > 0 && aAcct.text.trim().length > 30
+                    onClicked: root.act("setLezAccount", [JSON.stringify({ wallet: aWallet.text.trim(), account: aAcct.text.trim() })], "Saved", function () { accountDialog.close(); if (root.selSub) root.act("refreshSub", [root.selSub], "") }) }
+            }
+        }
+    }
+
+    // ── join or renew a paid repo
+    Popup {
+        id: payDialog; modal: true; anchors.centerIn: parent; width: 600; padding: 18
+        background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        property bool renewing: false
+        readonly property var t: root.terms(root.curSub)
+        function show(renew) { renewing = !!renew; pPeriods.value = 1; pPhone.text = ""; open() }
+        ColumnLayout {
+            width: parent.width; spacing: 10
+            T { text: (payDialog.renewing ? "Renew " : "Join ") + (root.curSub ? root.curSub.name : ""); font.bold: true; font.pixelSize: 17 }
+            Sub { Layout.fillWidth: true; text: payDialog.t ? (payDialog.t.price + " per " + root.period(payDialog.t.periodMs) + (payDialog.renewing ? ". Renewing adds to what's left (or starts now if it ran out)." : ".")) : "" }
+            RowLayout {
+                Sub { text: "How many " + (payDialog.t ? root.period(payDialog.t.periodMs) : "period") + "s" }
+                SpinBox { id: pPeriods; from: 1; to: 1200; value: 1; editable: true }
+            }
+            T { text: payDialog.t ? ("Total: " + (Number(payDialog.t.price) * pPeriods.value) + " (plus the network fee)") : ""; font.bold: true }
+            Sub { visible: !payDialog.renewing; Layout.fillWidth: true; text: "Your first phone: its member code (Backpack on the phone → Settings → This phone's member code → Copy link). Add more phones later." }
+            DField { id: pPhone; visible: !payDialog.renewing; placeholderText: "backpack://member?pk=…" }
+            RowLayout {
+                Item { Layout.fillWidth: true }
+                LogosButton { text: "Cancel"; onClicked: payDialog.close() }
+                LogosButton { text: "Pay " + (payDialog.t ? Number(payDialog.t.price) * pPeriods.value : "")
+                    enabled: !!payDialog.t && (payDialog.renewing || pPhone.text.trim().indexOf("backpack://member?") === 0)
+                    onClicked: root.act("payMembership", [root.selSub, String(pPeriods.value), payDialog.renewing ? "" : pPhone.text.trim(), String(payDialog.t.price)], "Paying… (a few seconds)", function () { payDialog.close() }) }
             }
         }
     }

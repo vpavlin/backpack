@@ -129,6 +129,17 @@ inline json lezMemberOp(const json& cfg, const std::string& op, const json& a) {
     throw Err("unknown LEZ operation");
 }
 
+// The program's config as the chain has it now (price_per_epoch, epoch_len_ms, treasury_hex, ...)
+inline json lezConfigOf(const json& cfg) {
+    std::string wallet = cfg.value("wallet", ""), seq = cfg.value("sequencer", ""), prog = cfg.value("program", "");
+    if (wallet.empty() || seq.empty() || prog.size() != 64) throw Err("LEZ isn't set up (wallet, sequencer, program id)");
+    LezFfi& f = LezFfi::get(cfg.value("lib", ""));
+    json o = {{"wallet_path", wallet}, {"sequencer_url", seq}, {"program_id_hex", prog}};
+    void* h = f.open(o.dump().c_str()); if (!h) throw Err("LEZ: couldn't open the config (check the wallet folder and program id)");
+    struct Closer { LezFfi& f; void* h; ~Closer() { f.close(h); } } closer{f, h};
+    return f.take(f.getConfig(h));
+}
+
 struct LezMember { std::string owner; std::vector<std::string> devices; int64_t paidThroughMs = 0; };
 struct LezSnapshot { std::vector<LezMember> members; json config; };
 

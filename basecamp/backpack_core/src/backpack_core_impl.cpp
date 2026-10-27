@@ -2,12 +2,13 @@
 #include "backpack_core_impl.h"
 #include "bp_fdroid.hpp"
 #include "bp_keys.hpp"
+#include "bp_subs.hpp"
 #include "qrcodegen.hpp"
 #include <cstdlib>
 
 using bp::json;
 namespace {
-const char* VERSION = "0.3.0";
+const char* VERSION = "0.4.0";
 std::string ok(json j = json::object()) { j["ok"] = true; return j.dump(); }
 std::string fail(const std::string& why) { return json{{"ok", false}, {"error", why}}.dump(); }
 json qrMatrix(const std::string& text) {
@@ -18,6 +19,12 @@ json qrMatrix(const std::string& text) {
 }
 }  // namespace
 
+// a Repo whose log and progress go into the job (under the module lock)
+#define BP_JOB_REPO(dirExpr)                                                                         \
+    bp::Repo r = bp::Repo::load(dirExpr);                                                            \
+    r.log = [this, &j](const std::string& m) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.log.push_back(m); }; \
+    r.progress = [this, &j](const std::string& w, int64_t d, int64_t t) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.progressWhat = w; j.done = d; j.total = t; };
+
 BackpackCoreImpl::~BackpackCoreImpl() = default;   // job threads are detached; the module lives as long as the process
 
 void BackpackCoreImpl::onContextReady() {
@@ -26,6 +33,57 @@ void BackpackCoreImpl::onContextReady() {
     else if (const char* h = std::getenv("HOME")) m_dataDir = std::string(h) + "/.backpack";
     else m_dataDir = ".backpack";
     loadPrefs();
+    startWatcher();
+}
+
+// Paid repos publish themselves when someone joins or a device is taken off (not when a membership only
+// runs out). Every BACKPACK_WATCH_SEC seconds (default 300): read the chain quietly; publish as a job
+// only when there is a reason, so an idle repo leaves no trace. Runs as long as the module does: in
+// Basecamp while it's open, or headless (logosctl) as an always-on publisher.
+void BackpackCoreImpl::startWatcher() {
+    int every = 300;
+    if (const char* e = std::getenv("BACKPACK_WATCH_SEC")) every = std::max(30, std::atoi(e));
+    std::thread([this, every]() {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(every));
+            std::vector<std::string> slugs;
+            {
+                std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                std::error_code ec;
+                if (bp::fs::is_directory(m_dataDir, ec))
+                    for (auto& e : bp::fs::directory_iterator(m_dataDir, ec))
+                        if (bp::fs::exists(e.path() / "repo.json") && bp::fs::exists(e.path() / "key.pem")) slugs.push_back(e.path().filename().string());
+            }
+            for (auto& slug : slugs) watchOnce(slug);
+        }
+    }).detach();
+}
+
+void BackpackCoreImpl::watchOnce(const std::string& slug) {
+    std::string dir;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        if (!validSlug(slug) || m_busyRepo.count(slug)) return;
+        m_busyRepo[slug] = 0;   // held while reading, so no job edits the repo meanwhile
+        dir = repoDir(slug);
+    }
+    std::string why;
+    try {
+        bp::Repo r = bp::Repo::load(dir);
+        if (r.usesLez() && r.lezAuto()) { r.syncLez(); why = r.lezChangeNeedsPublish(); }
+    } catch (...) {}   // chain or disk unreachable: try again next round
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        m_busyRepo.erase(slug);
+    }
+    if (why.empty()) return;
+    startJob("auto-publish", slug, [this, dir, why](Job& j) {
+        BP_JOB_REPO(dir)
+        r.log("LEZ: " + why + ": publishing");
+        json res = r.publish(false);
+        r.log("Published #" + std::to_string(res.value("seq", 0)));
+        return res.dump();
+    });
 }
 
 // app preferences beside the repos: the last Storage node used (a suggestion, never a default in code)
@@ -83,7 +141,12 @@ std::string BackpackCoreImpl::snapshot() {
         jobs.push_back(json{{"id", j.id}, {"kind", j.kind}, {"repo", j.repo}, {"state", j.state}, {"error", j.error}, {"log", log},
                             {"progress", json{{"what", j.progressWhat}, {"done", j.done}, {"total", j.total}}}, {"result", j.result.empty() ? json() : json::parse(j.result, nullptr, false)}});
     }
-    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}});
+    json subs = json::array(), me = json::object();
+    try {
+        bp::Subs x = bp::Subs::load(m_dataDir); me = x.s["me"];
+        for (auto& [k, v] : x.s["subs"].items()) { json o = v; o["busy"] = m_busyRepo.count(subSlug(k)) > 0; subs.push_back(o); }
+    } catch (...) {}
+    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}, {"subs", subs}, {"me", me}});
 }
 
 std::string BackpackCoreImpl::createRepo(std::string slug, std::string name, std::string privateFlag, std::string node) {
@@ -211,12 +274,6 @@ std::string BackpackCoreImpl::startJob(const std::string& kind, const std::strin
     return ok(json{{"job", j->id}});
 }
 
-// a Repo whose log and progress go into the job (under the module lock)
-#define BP_JOB_REPO(dirExpr)                                                                         \
-    bp::Repo r = bp::Repo::load(dirExpr);                                                            \
-    r.log = [this, &j](const std::string& m) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.log.push_back(m); }; \
-    r.progress = [this, &j](const std::string& w, int64_t d, int64_t t) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.progressWhat = w; j.done = d; j.total = t; };
-
 std::string BackpackCoreImpl::addApk(std::string slug, std::string apkPath) {
     if (apkPath.rfind("file://", 0) == 0) apkPath = apkPath.substr(7);
     std::string dir = repoDir(slug), signDir = m_dataDir + "/signing";
@@ -312,4 +369,74 @@ std::string BackpackCoreImpl::clearJobs() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     for (auto it = m_jobs.begin(); it != m_jobs.end();) { if (it->second->state != "running") it = m_jobs.erase(it); else ++it; }
     return ok();
+}
+
+// ---- following repos and paying for memberships (bp_subs.hpp) ----
+// A followed repo's jobs run under the slug "sub_<key>" (a b64url key is slug-safe), one at a time per repo.
+std::string BackpackCoreImpl::subSlug(const std::string& key) const { return "sub_" + key; }
+
+#define BP_JOB_SUBS                                                                                  \
+    bp::Subs x = bp::Subs::load(dataDir);                                                            \
+    x.log = [this, &j](const std::string& m) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.log.push_back(m); };
+
+std::string BackpackCoreImpl::follow(std::string link) {
+    std::string key;
+    try { key = bp::parseRepoLink(link).key; } catch (std::exception& e) { return fail(e.what()); }
+    std::string dataDir = m_dataDir;
+    return startJob("follow", subSlug(key), [this, dataDir, link](Job& j) {
+        BP_JOB_SUBS
+        json r = x.follow(link);
+        x.log("following " + r.value("name", std::string("the repo")) + (bp::Subs::paid(r) ? ": a paid repo" : ""));
+        return json{{"key", r["key"]}}.dump();
+    });
+}
+std::string BackpackCoreImpl::unfollow(std::string key) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (m_busyRepo.count(subSlug(key))) return fail("busy");
+    try { bp::Subs x = bp::Subs::load(m_dataDir); x.unfollow(key); return ok(); } catch (std::exception& e) { return fail(e.what()); }
+}
+std::string BackpackCoreImpl::refreshSub(std::string key) {
+    std::string dataDir = m_dataDir;
+    return startJob("check", subSlug(key), [this, dataDir, key](Job& j) {
+        BP_JOB_SUBS
+        json r = x.refresh(key);
+        if (r.contains("membershipError")) x.log("membership: " + r["membershipError"].get<std::string>());
+        x.log("update note #" + std::to_string(r.value("seq", 0)));
+        return std::string("{}");
+    });
+}
+std::string BackpackCoreImpl::setLezAccount(std::string meJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    try { bp::Subs x = bp::Subs::load(m_dataDir); x.setMe(json::parse(meJson)); return ok(); } catch (std::exception& e) { return fail(e.what()); }
+}
+std::string BackpackCoreImpl::payMembership(std::string key, std::string periods, std::string phoneLink, std::string expectPrice) {
+    uint64_t n = 0;
+    try { n = std::stoull(periods); } catch (...) { return fail("How many periods?"); }
+    if (n < 1 || n > 1200) return fail("1 to 1200 periods");
+    std::string dataDir = m_dataDir;
+    return startJob("pay", subSlug(key), [this, dataDir, key, n, phoneLink, expectPrice](Job& j) {
+        BP_JOB_SUBS
+        json r = x.pay(key, n, phoneLink, expectPrice);
+        x.refresh(key);
+        x.log("Done: the publisher's next update lets your devices in");
+        return r.dump();
+    });
+}
+std::string BackpackCoreImpl::addMyDevice(std::string key, std::string phoneLink) {
+    std::string dataDir = m_dataDir;
+    return startJob("device", subSlug(key), [this, dataDir, key, phoneLink](Job& j) {
+        BP_JOB_SUBS
+        json r = x.addDevice(key, phoneLink);
+        x.refresh(key);
+        return r.dump();
+    });
+}
+std::string BackpackCoreImpl::removeMyDevice(std::string key, std::string devicePk) {
+    std::string dataDir = m_dataDir;
+    return startJob("device", subSlug(key), [this, dataDir, key, devicePk](Job& j) {
+        BP_JOB_SUBS
+        json r = x.removeDevice(key, devicePk);
+        x.refresh(key);
+        return r.dump();
+    });
 }

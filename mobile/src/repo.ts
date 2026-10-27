@@ -122,6 +122,22 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
  * otherwise (re)loads `repo.indexCid` only if we have no index yet. Refuses any index whose seq is
  * below the highest one accepted (rollback), and an index that disagrees with its pointer.
  */
+/** This phone's key isn't in the repo's key bundle. For a paid repo, say how to join. */
+export class NotMember extends Error {
+  constructor(access?: Pointer["access"]) {
+    super(access
+      ? `this repo needs a paid membership${access.price ? ` (${access.price} per ${period(access.periodMs)})` : ""}: join it in Backpack on Basecamp (Following → + Follow a repo → Join) and add this phone's member code there (Settings → This phone's member code). This phone gets in at the publisher's next update, by itself`
+      : "you're not a member of this repo (yet): send the publisher this phone's member code (Settings → This phone's member code); it gets in at their next publish, by itself");
+  }
+}
+function period(ms?: number): string {
+  if (!ms) return "period";
+  const h = ms / 3600000, d = h / 24;
+  if (h < 24) return h === 1 ? "hour" : `${h} hours`;
+  if (d >= 28 && d <= 31) return "month";
+  return d === 1 ? "day" : d % 7 === 0 ? (d === 7 ? "week" : `${d / 7} weeks`) : `${d} days`;
+}
+
 export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<Repo> {
   const have = repo.seq ?? 0;
   onStage?.("checking for updates");
@@ -140,7 +156,7 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
     const kraw = await storage.getFile(ptr.keys, `${dir}/indexes/${ptr.keys}.keys.json`, peers, onStage, 0, onProgress, { max: 256 << 10 });
     const body = openEnvelope(JSON.parse(kraw), repo.key, "keys");
     const rk = await member.readKeyFromBundle(body, repo.key, ptr.epoch);
-    if (!rk) throw new Error("you're not a member of this repo (yet): show the publisher this phone's member code (Settings), they add it at their next publish");
+    if (!rk) throw new NotMember(ptr.access);
     repo = { ...repo, readKey: rk, keyEpoch: ptr.epoch, keysCid: ptr.keys, members: true };
     delivery.know(repo.key, rk);
   }
@@ -192,6 +208,8 @@ export async function addFromLink(link: string, repos: Repo[], onStage?: (s: str
       if (known && /older than the one you have/.test(String(e?.message))) { next = known; break; }   // keep the newer one, and its key
     }
   }
+  // not a member (yet): keep the repo anyway, so it gets in by itself once its owner joins or is added
+  if (!next && lastErr instanceof NotMember && base.members) next = { ...base, readKey: undefined, error: lastErr.message, checkedAt: new Date().toISOString() };
   if (!next) throw lastErr;
   const out = [...repos.filter((x) => x.key !== r.key), next];
   await saveRepos(out);

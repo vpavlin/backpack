@@ -1,7 +1,7 @@
 # 0013. Member repos: a key bundle instead of a key in the link
 
-**Status:** accepted (2026-10-27); implemented in backpack_core (Basecamp UI pending) and Backpack 0.2.16 (emulator-verified:
-add → the phone lists the repo; remove → it can no longer read new versions)
+**Status:** accepted (2026-10-27); implemented in backpack_core/ui 0.4.0 and Backpack 0.2.17 (verified in Basecamp 0.3.2 +
+emulator against the LEZ test chain: join, renew, add and take off a phone, each followed by an automatic publish)
 
 ## Context
 
@@ -47,3 +47,31 @@ device in a signed **key bundle** on Logos Storage.
 - Each publish where members changed (or an epoch passed) uploads one bundle: ~150 bytes per device.
 - The publisher must run: the bundle for a new member appears only at the next publish (a daemon does
   this for LEZ memberships).
+
+## Paid repos (LEZ memberships): the subscriber side
+
+Members can come from a paid membership on LEZ (backpack-access) as well as from the publisher's own list.
+Then the person paying, not the publisher, adds the phones:
+
+- **The pointer says how to join.** A paid repo's pointer carries `access: {via: "lez", program, sequencer,
+  price, periodMs}`, read from the chain at each publish. The pointer is plain and signed, so someone who isn't
+  a member yet can read the terms; the index stays encrypted. A change of terms counts as a change at publish.
+- **Basecamp has two sides.** *Following*: repos you follow by their link; for a paid one, Join / Renew with
+  your LEZ wallet and account, and your phones by their member codes (add, take off). *My repos*: the
+  publisher side, as before. One app, one core: a publisher usually follows other repos too.
+- **Only known programs take payments.** The wallet signs what the program asks, so the core pays only
+  through programs it knows (a list in `bp_subs.hpp`), whatever the pointer names, and refuses a payment
+  if the chain's price differs from the one the user saw.
+- **The publisher publishes by itself when someone joins or a device is taken off,** not when a
+  membership only runs out: an expired membership's devices just miss the key at the next publish that
+  happens anyway, and lose nothing they had. The core reads the chain every few minutes
+  (`BACKPACK_WATCH_SEC`, default 300) and publishes only for a joined or removed device. It runs wherever
+  the core runs: Basecamp while open, or headless (logosctl) as an always-on publisher.
+- **The phone says what to do.** Not a member of a paid repo: "this repo needs a paid membership (price per
+  period): join it in Backpack on Basecamp and add this phone's member code there". The phone keeps the
+  repo while it waits, so it gets in by itself after the next publish; there's no need to open the link again.
+- **Billing period:** set by the membership program (monthly in production; 1 hour on the test chain).
+  Per-repo price and period need a config per repo in the program (asked of its author, 2026-10-27).
+- **Privacy:** memberships are public on the chain (which account pays for which repo, how many devices).
+  Private registration is left for later.
+

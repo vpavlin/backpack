@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <chrono>
+#include <set>
 #include <ctime>
 #include <filesystem>
 #include <functional>
@@ -278,9 +279,32 @@ struct Repo {
         if (w.empty() || !fs::is_directory(w)) throw Err("the LEZ wallet folder doesn't exist");
         if (q.rfind("http://", 0) != 0 && q.rfind("https://", 0) != 0) throw Err("the sequencer is an http(s) address");
         if (pr.size() != 64 || pr.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) throw Err("the program id is 64 hex characters");
-        s["members"]["lez"] = ojson{{"wallet", w}, {"sequencer", q}, {"program", pr}, {"lib", lib}}; save();
+        s["members"]["lez"] = ojson{{"wallet", w}, {"sequencer", q}, {"program", pr}, {"lib", lib}, {"auto", cfg.value("auto", true)}}; save();
+    }
+    ojson lezAccess() const {
+        const auto& z = s["members"]["lez"];
+        ojson a{{"via", "lez"}, {"program", z["program"]}, {"sequencer", z["sequencer"]}};
+        if (s["members"].contains("lezTerms")) { a["price"] = s["members"]["lezTerms"]["price"]; a["periodMs"] = s["members"]["lezTerms"]["periodMs"]; }
+        return a;
+    }
+    // After a read: does the chain hold a change that needs a publish? Someone joined (a paid device not in
+    // the last key bundle) or a device was taken off a membership: yes. A membership only running out: no,
+    // its devices just miss the next key, whenever the next publish happens anyway.
+    std::string lezChangeNeedsPublish() const {
+        if (!usesLez()) return "";
+        std::set<std::string> published, registered, manual;
+        for (auto& p : s["members"].value("publishedPks", ojson::array())) published.insert(p.get<std::string>());
+        for (auto& d : s["members"]["devices"]) manual.insert(d["pk"].get<std::string>());
+        for (auto& lm : s["members"].value("lezMembers", ojson::array())) for (auto& d : lm["devices"]) registered.insert(d.get<std::string>());
+        size_t added = 0, removed = 0;
+        for (auto& p : memberPks()) if (!published.count(p)) added++;
+        for (auto& p : published) if (!registered.count(p) && !manual.count(p)) removed++;
+        if (!added && !removed) return "";
+        return std::to_string(added) + " device(s) joined, " + std::to_string(removed) + " removed";
     }
     bool usesLez() const { return isMembers() && s["members"].contains("lez") && s["members"]["lez"].is_object(); }
+    // publish by itself when someone joins or a device is taken off (default on)
+    bool lezAuto() const { return usesLez() && s["members"]["lez"].value("auto", true); }
     // Read the memberships from the chain; keep the last good list if the chain can't be reached.
     json syncLez() {
         if (!usesLez()) throw Err("this repo doesn't use LEZ memberships");
@@ -291,7 +315,12 @@ struct Repo {
             list.push_back(ojson{{"owner", lm.owner}, {"devices", ds}, {"paidThroughMs", lm.paidThroughMs}});
             if (lm.paidThroughMs > now) { active++; devs += lm.devices.size(); }
         }
-        s["members"]["lezMembers"] = list; s["members"]["lezSyncedAt"] = nowIso(); save();
+        s["members"]["lezMembers"] = list; s["members"]["lezSyncedAt"] = nowIso();
+        // what a membership costs, as the chain says: published in the pointer for people deciding to join
+        const json& c = snap.config;
+        std::string price = c.contains("price_per_epoch") ? (c["price_per_epoch"].is_string() ? c["price_per_epoch"].get<std::string>() : c["price_per_epoch"].dump()) : "";
+        s["members"]["lezTerms"] = ojson{{"price", price}, {"periodMs", c.value("epoch_len_ms", (int64_t)0)}};
+        save();
         log("LEZ: " + std::to_string(snap.members.size()) + " membership(s), " + std::to_string(active) + " paid up, " + std::to_string(devs) + " device(s)");
         return json{{"memberships", snap.members.size()}, {"active", active}, {"devices", devs}, {"config", snap.config}};
     }
@@ -321,7 +350,8 @@ struct Repo {
         TempDir t; fs::path f = t.p / "backpack-keys.json"; std::ofstream(f, std::ios::binary) << bundle;
         log("members: new key for epoch " + std::to_string(epoch) + ", " + std::to_string(pks.size()) + " device(s)");
         std::string cid = n.upload(f.string(), "backpack-keys.json", "application/json");
-        m["epoch"] = epoch; m["epochKey"] = ek; m["devHash"] = devHash; m["keysCid"] = cid; save();
+        ojson pub = ojson::array(); for (auto& p : pks) pub.push_back(p);
+        m["epoch"] = epoch; m["epochKey"] = ek; m["devHash"] = devHash; m["keysCid"] = cid; m["publishedPks"] = pub; save();
     }
 
     std::string linkFor(const std::string& indexCid, const json& nodeInfo) const {
@@ -348,6 +378,7 @@ struct Repo {
         if (apps.size() > MAX_APPS) throw Err("more apps than a phone accepts");
         ojson sortedAddrs = ni["addrs"]; std::sort(sortedAddrs.begin(), sortedAddrs.end());
         ojson hashIn{{"name", s["name"]}, {"readKey", readKey().empty() ? ojson(nullptr) : ojson(readKey())}, {"nodes", ojson::array({ojson{{"peerId", ni["peerId"]}, {"addrs", sortedAddrs}}})}, {"pointers", s["pointers"]["get"]}, {"apps", apps}};
+        if (usesLez()) hashIn["access"] = lezAccess();   // new terms are news for people deciding to join
         std::string contentHash = sha256hex(hashIn.dump());
         if (!force && s.value("lastContentHash", "") == contentHash) return json{{"ok", true}, {"unchanged", true}, {"seq", s.value("seq", 0)}};
         int64_t seq = s.value("seq", 0) + 1; std::string created = nowIso(); Key k = key(); std::string K = k.pub();
@@ -360,6 +391,8 @@ struct Repo {
         ojson pbody{{"key", K}, {"seq", seq}, {"index", cid}, {"created", created}, {"nodes", nodes}};
         // a member repo's pointer is public and names the key bundle (ADR 0013)
         if (isMembers()) { pbody["keys"] = s["members"]["keysCid"]; pbody["epoch"] = s["members"]["epoch"]; }
+        // a paid repo says where and for how much one joins (public: the membership is on a public chain anyway)
+        if (usesLez()) pbody["access"] = lezAccess();
         std::string pointer = seal("pointer", pbody, k, isMembers() ? std::string() : readKey());
         fs::path pf = dir / "latest.json"; writeFileAtomic(pf, pointer, 0644);
         s["seq"] = seq; s["lastIndex"] = cid; s["lastContentHash"] = contentHash;
@@ -428,7 +461,7 @@ struct Repo {
         json gets = json::array(); for (auto& u : s["pointers"]["get"]) gets.push_back(u.get<std::string>());
         json puts = json::array(); for (auto& u : s["pointers"]["put"]) { std::string t = u; puts.push_back(t.substr(0, t.find(':'))); }
         return json{{"slug", dir.filename().string()}, {"name", s.value("name", "")}, {"key", pub()}, {"seq", s.value("seq", 0)}, {"private", !readKey().empty() || isMembers()}, {"members", isMembers()}, {"memberDevices", isMembers() ? json::parse(s["members"]["devices"].dump()) : json::array()}, {"epoch", isMembers() ? json(s["members"].value("epoch", (uint64_t)0)) : json()},
-                    {"lez", usesLez() ? json{{"sequencer", s["members"]["lez"].value("sequencer", "")}, {"program", s["members"]["lez"].value("program", "")}, {"wallet", s["members"]["lez"].value("wallet", "")}, {"syncedAt", s["members"].value("lezSyncedAt", "")}, {"members", json::parse(s["members"].value("lezMembers", ojson::array()).dump())}} : json()},
+                    {"lez", usesLez() ? json{{"sequencer", s["members"]["lez"].value("sequencer", "")}, {"program", s["members"]["lez"].value("program", "")}, {"wallet", s["members"]["lez"].value("wallet", "")}, {"syncedAt", s["members"].value("lezSyncedAt", "")}, {"auto", lezAuto()}, {"terms", json::parse(s["members"].value("lezTerms", ojson::object()).dump())}, {"members", json::parse(s["members"].value("lezMembers", ojson::array()).dump())}} : json()},
                     {"pointerId", pointerId()}, {"node", s.value("node", std::string())}, {"nodeWarning", s.value("node", std::string()).empty() ? std::string("no Storage node set") : nodeWarning(s.value("node", std::string()))}, {"apps", apps}, {"pointersGet", gets}, {"pointersPut", puts}, {"hasLink", s.contains("lastLink")}, {"lastIndex", s.value("lastIndex", "")}};
     }
 };

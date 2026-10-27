@@ -8,6 +8,7 @@
 // comments on declaration lines; ASCII only. Slow work (uploads) runs on worker threads as JOBS; the
 // view follows them in snapshot().
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,6 +63,20 @@ public:
     std::string importFdroid(std::string slug, std::string repoUrl, std::string fingerprint, std::string versions);
     std::string clearJobs();
 
+    // Following repos (the subscriber side): a repo someone else publishes, by its link. A paid repo's
+    // membership is bought here with the user's LEZ wallet; its devices are the user's phones (their
+    // member codes), let in at the publisher's next publish. All of it shows in snapshot().subs / .me.
+    std::string follow(std::string link);
+    std::string unfollow(std::string key);
+    std::string refreshSub(std::string key);
+    // {"wallet": LEZ wallet folder, "account": the paying account id (base58, as the wallet shows it)}
+    std::string setLezAccount(std::string meJson);
+    // Join (phoneLink = the first phone's member code) or renew (phoneLink ignored). expectPrice: the
+    // per-period price shown to the user; the payment is refused if the chain's price differs.
+    std::string payMembership(std::string key, std::string periods, std::string phoneLink, std::string expectPrice);
+    std::string addMyDevice(std::string key, std::string phoneLink);
+    std::string removeMyDevice(std::string key, std::string devicePk);
+
 protected:
     void onContextReady() override;
 
@@ -74,6 +89,9 @@ private:
     std::string startJob(const std::string& kind, const std::string& slug, std::function<std::string(Job&)> work);
     std::string repoDir(const std::string& slug) const;
     bool validSlug(const std::string& slug) const;
+    std::string subSlug(const std::string& key) const;
+    void startWatcher();
+    void watchOnce(const std::string& slug);
 
     std::recursive_mutex m_mtx;
     std::string m_dataDir;
