@@ -13,7 +13,7 @@ namespace bp {
 // the wallet signs whatever the program asks, so the publisher must not be able to pick it.
 inline bool knownLezProgram(const std::string& hex) {
     static const char* known[] = {
-        "cb23358fd7150fdd38504b132eebe18abe2c4183c7a31133fdc94e43b3aa254c",   // backpack_access v3 (test chain)
+        "7a285f2140b3e5dc097421f779b8ff353ec69c38303ad8c133af1ae3631234af",   // backpack_access, one config per repo (test chain)
     };
     for (auto k : known) if (hex == k) return true;
     return false;
@@ -105,18 +105,20 @@ struct Subs {
         if (!knownLezProgram(prog)) throw Err("this repo asks for payment through a membership program this Backpack doesn't know (" + prog.substr(0, 12) + "...): refusing");
         if (seq.rfind("http://", 0) != 0 && seq.rfind("https://", 0) != 0) throw Err("the repo's sequencer address is malformed");
         if (!s["me"].contains("wallet")) throw Err("set your LEZ wallet and account first");
-        return json{{"wallet", s["me"]["wallet"]}, {"sequencer", seq}, {"program", prog}};
+        // the config is the repo's own: derived from the key in the link, not taken from the pointer
+        return json{{"wallet", s["me"]["wallet"]}, {"sequencer", seq}, {"program", prog}, {"config", lezConfigId(x["key"].get<std::string>())}};
     }
     // My membership of this repo, as the chain has it, and the current price.
     void readMembership(json& x) {
         if (!s["me"].contains("account")) return;
         try {
             json cfg = lezCfg(x);
+            json c = lezConfigOf(cfg);
+            if (c.is_null()) throw Err("the publisher hasn't set up memberships on the chain yet");
+            x["terms"] = json{{"price", lezPrice(c)}, {"periodMs", c.value("epoch_len_ms", (int64_t)0)}};
             json m = lezMemberOp(cfg, "get", json{{"account", s["me"]["account"]}});
             x["membership"] = json{{"found", m.value("found", false)}, {"paidThroughMs", m.contains("paid_through_ms") ? (m["paid_through_ms"].is_string() ? std::atoll(m["paid_through_ms"].get<std::string>().c_str()) : m["paid_through_ms"].get<int64_t>()) : 0},
                                    {"devices", m.value("devices", json::array())}, {"readAt", nowIso()}};
-            json c = lezConfigOf(cfg);
-            x["terms"] = json{{"price", c.contains("price_per_epoch") ? (c["price_per_epoch"].is_string() ? c["price_per_epoch"].get<std::string>() : c["price_per_epoch"].dump()) : ""}, {"periodMs", c.value("epoch_len_ms", (int64_t)0)}};
         } catch (std::exception& e) { x["membershipError"] = e.what(); return; }
         x.erase("membershipError");
     }
@@ -127,7 +129,8 @@ struct Subs {
         json& x = sub(key); json cfg = lezCfg(x);
         if (!s["me"].contains("account")) throw Err("set your LEZ account first");
         json c = lezConfigOf(cfg);
-        std::string price = c.contains("price_per_epoch") ? (c["price_per_epoch"].is_string() ? c["price_per_epoch"].get<std::string>() : c["price_per_epoch"].dump()) : "";
+        if (c.is_null()) throw Err("the publisher hasn't set up memberships on the chain yet");
+        std::string price = lezPrice(c);
         if (!expectPrice.empty() && price != expectPrice) throw Err("the price changed to " + price + " per period: look again before paying");
         readMembership(x);
         bool member = x.contains("membership") && x["membership"].value("found", false);

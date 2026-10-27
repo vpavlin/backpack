@@ -1,12 +1,14 @@
 #pragma once
 // bp_lez.hpp - LEZ memberships (backpack-access, ADR 0010) as a source of member devices (ADR 0013).
 // The backpack_access_ffi library is loaded at run time (dlopen), so backpack_core works without it;
-// only a repo set to use LEZ needs it. Read-only here: list the registry, read each membership.
+// only a repo set to use LEZ needs it. One program deployment serves many repos: each repo has its own
+// config (price, period, treasury, member registry) keyed by its config id = the repo's publisher key.
 #include "bp_crypto.hpp"
 #include <dlfcn.h>
 #include <unistd.h>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 namespace bp {
 struct LezFfi {
@@ -15,13 +17,15 @@ struct LezFfi {
     void (*close)(void*) = nullptr;
     char* (*list)(const void*, const char*) = nullptr;
     char* (*getMany)(const void*, const char*) = nullptr;
-    char* (*getConfig)(const void*) = nullptr;
+    char* (*getConfig)(const void*, const char*) = nullptr;
+    char* (*cfgCreate)(const void*, const char*) = nullptr;
+    char* (*cfgUpdate)(const void*, const char*) = nullptr;
     char* (*reg)(const void*, const char*) = nullptr;
     char* (*renew)(const void*, const char*) = nullptr;
     char* (*addDev)(const void*, const char*) = nullptr;
     char* (*rmDev)(const void*, const char*) = nullptr;
     char* (*getOne)(const void*, const char*) = nullptr;
-    char* (*balance)(const void*) = nullptr;
+    char* (*balance)(const void*, const char*) = nullptr;
     void (*freeStr)(char*) = nullptr;
     // The copy shipped in the module package, next to this plugin's .so ("" if there is none)
     static std::string bundled() {
@@ -44,13 +48,16 @@ struct LezFfi {
         n.close = (void (*)(void*))dlsym(h, "backpack_access_config_close");
         n.list = (char* (*)(const void*, const char*))dlsym(h, "backpack_access_member_list");
         n.getMany = (char* (*)(const void*, const char*))dlsym(h, "backpack_access_member_get_many");
-        n.getConfig = (char* (*)(const void*))dlsym(h, "backpack_access_get_config");
+        n.getConfig = (char* (*)(const void*, const char*))dlsym(h, "backpack_access_get_config");
         n.freeStr = (void (*)(char*))dlsym(h, "backpack_access_free_string");
         using W = char* (*)(const void*, const char*);
         n.reg = (W)dlsym(h, "backpack_access_member_register"); n.renew = (W)dlsym(h, "backpack_access_member_renew");
         n.addDev = (W)dlsym(h, "backpack_access_member_add_device"); n.rmDev = (W)dlsym(h, "backpack_access_member_remove_device");
-        n.getOne = (W)dlsym(h, "backpack_access_member_get"); n.balance = (char* (*)(const void*))dlsym(h, "backpack_access_treasury_balance");
+        n.getOne = (W)dlsym(h, "backpack_access_member_get"); n.balance = (W)dlsym(h, "backpack_access_treasury_balance");
+        n.cfgCreate = (W)dlsym(h, "backpack_access_config_create"); n.cfgUpdate = (W)dlsym(h, "backpack_access_config_update");
         if (!n.open || !n.close || !n.list || !n.getMany || !n.getConfig || !n.freeStr) { dlclose(h); throw Err("the LEZ membership library lacks the expected functions"); }
+        // per-repo configs (multi-publisher program): an older library speaks a different API
+        if (!n.cfgCreate || !n.cfgUpdate) { dlclose(h); throw Err("this LEZ membership library is too old (no per-repo configs)"); }
         if (f.h) dlclose(f.h);
         f = n; loaded = p; return f;
     }
@@ -106,56 +113,87 @@ inline std::string accountToHex(std::string a) {
     static const char* H = "0123456789abcdef"; std::string o; for (auto c : b) { o += H[c >> 4]; o += H[c & 15]; } return o;
 }
 
+// The repo's config id on the chain: its publisher key (Ed25519, 32 bytes), as hex. Anyone holding the
+// repo link can derive it; the publisher creates the config under it.
+inline std::string lezConfigId(const std::string& repoKeyB64) { return b64ToHex32(repoKeyB64); }
+
+// An open handle on the program with one repo's config. cfg: {wallet, sequencer, program, config, lib}
+struct LezSession {
+    LezFfi& f; void* h = nullptr; std::string cid;
+    explicit LezSession(const json& cfg) : f(LezFfi::get(cfg.value("lib", ""))) {
+        std::string wallet = cfg.value("wallet", ""), seq = cfg.value("sequencer", ""), prog = cfg.value("program", "");
+        cid = cfg.value("config", "");
+        if (wallet.empty() || seq.empty() || prog.size() != 64) throw Err("LEZ isn't set up (wallet, sequencer, program id)");
+        if (cid.size() != 64 || cid.find_first_not_of("0123456789abcdef") != std::string::npos) throw Err("LEZ: the repo's config id is malformed");
+        h = f.open(json{{"wallet_path", wallet}, {"sequencer_url", seq}, {"program_id_hex", prog}}.dump().c_str());
+        if (!h) throw Err("LEZ: couldn't open the wallet (check the wallet folder and program id)");
+    }
+    ~LezSession() { if (h) f.close(h); }
+    LezSession(const LezSession&) = delete; LezSession& operator=(const LezSession&) = delete;
+    json call(char* (*fn)(const void*, const char*), json args) { if (!fn) throw Err("the LEZ library lacks that call"); args["config_id_hex"] = cid; return f.take(fn(h, args.dump().c_str())); }
+    // the repo's config, or a null json when it hasn't been created yet
+    json config() {
+        try { return call(f.getConfig, json::object()); }
+        catch (Err& e) { std::string m = e.what(); if (m.find("no ConfigState") != std::string::npos || m.find("not found") != std::string::npos || m.find("not initialized") != std::string::npos || m.find("does not exist") != std::string::npos) return json(); throw; }
+    }
+};
+
+inline std::string lezPrice(const json& c) {
+    if (!c.contains("price_per_epoch")) return "";
+    return c["price_per_epoch"].is_string() ? c["price_per_epoch"].get<std::string>() : c["price_per_epoch"].dump();
+}
+
 // The member side: pay for / extend a membership, add or remove a device. The wallet in cfg pays and signs.
 // op: register {account, devicePk, epochs} | renew {account, epochs} | addDevice/removeDevice {account, devicePk} | get {account}
 inline json lezMemberOp(const json& cfg, const std::string& op, const json& a) {
-    std::string wallet = cfg.value("wallet", ""), seq = cfg.value("sequencer", ""), prog = cfg.value("program", "");
-    if (wallet.empty() || seq.empty() || prog.size() != 64) throw Err("LEZ isn't set up (wallet, sequencer, program id)");
-    LezFfi& f = LezFfi::get(cfg.value("lib", ""));
-    if (!f.reg || !f.renew || !f.addDev || !f.rmDev || !f.getOne) throw Err("the LEZ library lacks the membership calls");
-    json o = {{"wallet_path", wallet}, {"sequencer_url", seq}, {"program_id_hex", prog}};
-    void* h = f.open(o.dump().c_str()); if (!h) throw Err("LEZ: couldn't open the config (check the wallet folder and program id)");
-    struct Closer { LezFfi& f; void* h; ~Closer() { f.close(h); } } closer{f, h};
+    LezSession z(cfg);
     std::string acct = accountToHex(a.value("account", ""));
     uint64_t epochs = a.value("epochs", (uint64_t)0);
     if ((op == "register" || op == "renew") && (epochs < 1 || epochs > 100000)) throw Err("epochs: 1 to 100000");
-    if (op == "register") return f.take(f.reg(h, json{{"member_account_id_hex", acct}, {"x25519_pubkey_hex", b64ToHex32(a.value("devicePk", ""))}, {"epochs", epochs}}.dump().c_str()));
-    if (op == "renew") return f.take(f.renew(h, json{{"holder_account_id_hex", acct}, {"epochs", epochs}}.dump().c_str()));
-    if (op == "addDevice") return f.take(f.addDev(h, json{{"owner_account_id_hex", acct}, {"x25519_pubkey_hex", b64ToHex32(a.value("devicePk", ""))}}.dump().c_str()));
-    if (op == "removeDevice") return f.take(f.rmDev(h, json{{"owner_account_id_hex", acct}, {"x25519_pubkey_hex", b64ToHex32(a.value("devicePk", ""))}}.dump().c_str()));
-    if (op == "get") { json r = f.take(f.getOne(h, json{{"owner_account_id_hex", acct}}.dump().c_str()));
+    if (op == "register") return z.call(z.f.reg, json{{"member_account_id_hex", acct}, {"x25519_pubkey_hex", b64ToHex32(a.value("devicePk", ""))}, {"epochs", epochs}});
+    if (op == "renew") return z.call(z.f.renew, json{{"holder_account_id_hex", acct}, {"epochs", epochs}});
+    if (op == "addDevice") return z.call(z.f.addDev, json{{"owner_account_id_hex", acct}, {"x25519_pubkey_hex", b64ToHex32(a.value("devicePk", ""))}});
+    if (op == "removeDevice") return z.call(z.f.rmDev, json{{"owner_account_id_hex", acct}, {"x25519_pubkey_hex", b64ToHex32(a.value("devicePk", ""))}});
+    if (op == "get") { json r = z.call(z.f.getOne, json{{"owner_account_id_hex", acct}});
         if (r.contains("devices")) { json ds = json::array(); for (auto& d : r["devices"]) if (d.is_string()) ds.push_back(lezDeviceToB64(d)); r["devices"] = ds; }
         return r; }
     throw Err("unknown LEZ operation");
 }
 
-// The program's config as the chain has it now (price_per_epoch, epoch_len_ms, treasury_hex, ...)
-inline json lezConfigOf(const json& cfg) {
-    std::string wallet = cfg.value("wallet", ""), seq = cfg.value("sequencer", ""), prog = cfg.value("program", "");
-    if (wallet.empty() || seq.empty() || prog.size() != 64) throw Err("LEZ isn't set up (wallet, sequencer, program id)");
-    LezFfi& f = LezFfi::get(cfg.value("lib", ""));
-    json o = {{"wallet_path", wallet}, {"sequencer_url", seq}, {"program_id_hex", prog}};
-    void* h = f.open(o.dump().c_str()); if (!h) throw Err("LEZ: couldn't open the config (check the wallet folder and program id)");
-    struct Closer { LezFfi& f; void* h; ~Closer() { f.close(h); } } closer{f, h};
-    return f.take(f.getConfig(h));
+// The repo's config as the chain has it now (price_per_epoch, epoch_len_ms, treasury_hex, admin_hex, ...); null if none yet
+inline json lezConfigOf(const json& cfg) { LezSession z(cfg); return z.config(); }
+
+// The publisher side: create the repo's config, or update its price and period (applies to later payments).
+// admin: the publisher's LEZ account (base58 or hex), in the wallet; it signs, becomes the admin and receives the payments.
+inline json lezEnsureConfig(const json& cfg, const std::string& admin, const std::string& price, int64_t periodMs, const std::function<void(const std::string&)>& log) {
+    if (price.empty() || price.size() > 30 || price.find_first_not_of("0123456789") != std::string::npos) throw Err("the price is a whole number");
+    if (periodMs < 60000) throw Err("the period is at least a minute");
+    LezSession z(cfg);
+    std::string adminHex = accountToHex(admin);
+    json c = z.config();
+    if (c.is_null()) {
+        log("LEZ: creating this repo's membership config (" + price + " per period)");
+        json r = z.call(z.f.cfgCreate, json{{"admin_account_id_hex", adminHex}, {"treasury_hex", adminHex}, {"price_per_epoch", price}, {"epoch_len_ms", periodMs}});
+        log("LEZ: created, transaction " + r.value("tx_hash", std::string("?")).substr(0, 16) + "...");
+        return r;
+    }
+    if (c.value("admin_hex", std::string()) != adminHex) throw Err("this repo's membership config belongs to another account (" + c.value("admin_hex", std::string()).substr(0, 12) + "...): set that account");
+    if (lezPrice(c) == price && c.value("epoch_len_ms", (int64_t)0) == periodMs) return c;
+    log("LEZ: updating the price/period to " + price + " per " + std::to_string(periodMs / 86400000) + " day(s) (later payments)");
+    return z.call(z.f.cfgUpdate, json{{"admin_account_id_hex", adminHex}, {"price_per_epoch", price}, {"epoch_len_ms", periodMs}});
 }
 
 struct LezMember { std::string owner; std::vector<std::string> devices; int64_t paidThroughMs = 0; };
 struct LezSnapshot { std::vector<LezMember> members; json config; };
 
-// Every membership in the registry, with its devices and paid-through time.
+// Every membership in the repo's registry, with its devices and paid-through time.
 inline LezSnapshot lezRead(const json& cfg) {
-    std::string wallet = cfg.value("wallet", ""), seq = cfg.value("sequencer", ""), prog = cfg.value("program", "");
-    if (wallet.empty() || seq.empty() || prog.size() != 64) throw Err("LEZ isn't set up for this repo (wallet, sequencer, program id)");
-    LezFfi& f = LezFfi::get(cfg.value("lib", ""));
-    json o = {{"wallet_path", wallet}, {"sequencer_url", seq}, {"program_id_hex", prog}};
-    void* h = f.open(o.dump().c_str());
-    if (!h) throw Err("LEZ: couldn't open the config (check the wallet folder and program id)");
-    struct Closer { LezFfi& f; void* h; ~Closer() { f.close(h); } } closer{f, h};
-    LezSnapshot snap; snap.config = f.take(f.getConfig(h));
+    LezSession z(cfg);
+    LezSnapshot snap; snap.config = z.config();
+    if (snap.config.is_null()) throw Err("LEZ: this repo has no membership config yet (save the LEZ settings to create it)");
     std::vector<std::string> pdas; uint64_t from = 0;
     for (int guard = 0; guard < 200; guard++) {
-        json page = f.take(f.list(h, json{{"from_index", from}}.dump().c_str()));
+        json page = z.call(z.f.list, json{{"from_index", from}});
         for (auto& e : page.value("entries", json::array())) if (e.contains("membership_pda_hex") && e["membership_pda_hex"].is_string()) pdas.push_back(e["membership_pda_hex"]);
         uint64_t next = page.value("next_cursor", from), upto = page.value("next_member_index", next);
         if (next == from || next >= upto) break;
@@ -164,7 +202,7 @@ inline LezSnapshot lezRead(const json& cfg) {
     if (pdas.size() > 5000) throw Err("LEZ: too many memberships");
     for (size_t i = 0; i < pdas.size(); i += 100) {
         std::vector<std::string> chunk(pdas.begin() + i, pdas.begin() + std::min(pdas.size(), i + 100));
-        json r = f.take(f.getMany(h, json{{"membership_pdas_hex", chunk}}.dump().c_str()));
+        json r = z.call(z.f.getMany, json{{"membership_pdas_hex", chunk}});
         for (auto& m : r.value("members", json::array())) {
             if (!m.value("found", false)) continue;
             LezMember lm; lm.owner = m.value("owner", std::string());

@@ -109,7 +109,16 @@ Item {
     // nowhere publish sends it, no phone can ever get in (the link carries no key)
     function noteMissing() { return !!(root.cur && root.cur.members && (!root.cur.pointersGet.length || !root.cur.pointersPut.length)) }
     readonly property string noteMissingText: "No phone can read this repo yet: phones get their key from the update note, and " + (root.cur && !root.cur.pointersGet.length ? "it has no web address (Settings)." : "publish sends it nowhere (backpack config --pointer-put).")
+    // devices that can read a members repo: added by hand + those of paid-up memberships
+    function deviceCount(r) {
+        if (!r) return 0
+        var n = r.memberDevices ? r.memberDevices.length : 0
+        if (r.lez && r.lez.members) for (var i = 0; i < r.lez.members.length; i++) if (r.lez.members[i].paidThroughMs > Date.now()) n += r.lez.members[i].devices.length
+        return n
+    }
     function lezActive(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i].paidThroughMs > Date.now()) n++; return n }
+    // the membership program this build knows (backpack_access, one config per repo; test chain)
+    readonly property string lezProgram: "7a285f2140b3e5dc097421f779b8ff353ec69c38303ad8c133af1ae3631234af"
     // a billing period in words
     function period(ms) {
         if (!ms) return "period"
@@ -286,7 +295,7 @@ Item {
                         RowLayout {
                             T { text: root.cur ? root.cur.name : ""; font.pixelSize: 22; font.bold: true }
                             Badge { visible: !!(root.cur && root.cur.private && !root.cur.members); text: "🔒 private"; tone: root.cWarn }
-                            Badge { visible: !!(root.cur && root.cur.members); text: "👥 members · " + (root.cur && root.cur.memberDevices ? root.cur.memberDevices.length : 0) + " devices"; tone: root.cAccent }
+                            Badge { visible: !!(root.cur && root.cur.members); text: "👥 members · " + root.deviceCount(root.cur) + " devices"; tone: root.cAccent }
                             Badge { visible: !!(root.cur && !root.cur.private); text: "public"; tone: root.cOk }
                             Badge { visible: !!(root.cur && root.cur.busy); text: "working…"; tone: root.cAccent }
                         }
@@ -562,7 +571,7 @@ Item {
                 Repeater {
                     model: [{ k: "0", t: "Public: anyone with the link" },
                             { k: "1", t: "Private: only people with the invite link (the link carries the read key)" },
-                            { k: "2", t: "Members: only devices you add (the link carries no key; you add each phone's member code)" }]
+                            { k: "2", t: "Members: only member devices: ones you add by their member code, or (with paid memberships on) people who pay. The link carries no key" }]
                     RadioButton {
                         checked: nKind.kind === modelData.k; onClicked: nKind.kind = modelData.k; text: modelData.t
                         contentItem: Text { leftPadding: 28; text: parent.text; color: root.cText; font.pixelSize: 13; textFormat: Text.PlainText; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter }
@@ -672,7 +681,7 @@ Item {
             }
             Sub { Layout.fillWidth: true; visible: !(root.cur && root.cur.lez); text: "Off. With it on, everyone who pays for a membership on the Logos Execution Zone gets their devices added here automatically, until it runs out." }
             Sub { Layout.fillWidth: true; visible: !!(root.cur && root.cur.lez)
-                  text: root.cur && root.cur.lez ? (root.cur.lez.members.length + " membership(s) · " + root.lezActive(root.cur.lez.members) + " paid up · last read " + (root.cur.lez.syncedAt ? root.cur.lez.syncedAt.slice(0, 16).replace("T", " ") : "never") + " · read again at every publish") : "" }
+                  text: root.cur && root.cur.lez ? ((root.cur.lez.terms && root.cur.lez.terms.price ? root.cur.lez.terms.price + " per " + root.period(root.cur.lez.terms.periodMs) + " · " : "") + root.cur.lez.members.length + " membership(s) · " + root.lezActive(root.cur.lez.members) + " paid up · last read " + (root.cur.lez.syncedAt ? root.cur.lez.syncedAt.slice(0, 16).replace("T", " ") : "never") + " · read again at every publish") : "" }
             ListView {
                 Layout.fillWidth: true; Layout.preferredHeight: Math.min(contentHeight, 140); clip: true; spacing: 4
                 model: root.cur && root.cur.lez ? root.cur.lez.members : []
@@ -685,18 +694,32 @@ Item {
             }
             ColumnLayout {
                 id: lezBox; visible: false; Layout.fillWidth: true; spacing: 6
-                onVisibleChanged: if (visible) { lzWallet.text = root.cur && root.cur.lez ? root.cur.lez.wallet : ""; lzSeq.text = root.cur && root.cur.lez ? root.cur.lez.sequencer : ""; lzProg.text = root.cur && root.cur.lez ? root.cur.lez.program : "" }
-                Sub { text: "Wallet folder (reads only; it pays nothing here)" }
-                DField { id: lzWallet; placeholderText: "/home/me/.backpack-lez/ops-wallet" }
+                readonly property var periods: [{ t: "month (30 days)", ms: 2592000000 }, { t: "week", ms: 604800000 }, { t: "day", ms: 86400000 }, { t: "hour (testing)", ms: 3600000 }]
+                onVisibleChanged: if (visible) {
+                    var z = root.cur && root.cur.lez ? root.cur.lez : null
+                    lzWallet.text = z ? z.wallet : ""; lzSeq.text = z ? z.sequencer : ""; lzProg.text = z && z.program ? z.program : root.lezProgram
+                    lzAdmin.text = z && z.admin ? z.admin : ""; lzPrice.text = z && z.price ? z.price : ""
+                    var pi = 0; for (var k = 0; k < periods.length; k++) if (z && z.periodMs === periods[k].ms) pi = k; lzPeriod.currentIndex = pi
+                }
+                Sub { Layout.fillWidth: true; text: "Saving creates this repo's membership terms on the chain (or changes them: a new price applies to later payments). People join from Backpack on Basecamp; their phones get in at the next publish, which happens by itself." }
+                Sub { text: "Your LEZ wallet folder (signs the terms; pays only the network fee)" }
+                DField { id: lzWallet; placeholderText: "/home/you/.lee-wallet" }
+                Sub { text: "Your account in it: it receives the payments and alone can change the terms" }
+                DField { id: lzAdmin; placeholderText: "base58, as the LEZ Wallet app shows it" }
+                RowLayout {
+                    Layout.fillWidth: true
+                    ColumnLayout { Layout.fillWidth: true; Sub { text: "Price per period" } DField { id: lzPrice; placeholderText: "e.g. 100"; validator: RegularExpressionValidator { regularExpression: /[0-9]{1,30}/ } } }
+                    ColumnLayout { Sub { text: "Period" } ComboBox { id: lzPeriod; Layout.preferredWidth: 200; model: lezBox.periods.map(function (p) { return p.t }) } }
+                }
                 Sub { text: "Sequencer" }
                 DField { id: lzSeq; placeholderText: "http://sequencer.example:3040/" }
-                Sub { text: "backpack-access program id (64 hex)" }
-                DField { id: lzProg; placeholderText: "cb23…" }
+                Sub { text: "Membership program id (64 hex)" }
+                DField { id: lzProg }
                 RowLayout {
                     Item { Layout.fillWidth: true }
                     LogosButton { text: "Turn off"; visible: !!(root.cur && root.cur.lez); onClicked: root.act("setLez", [root.sel, "{}"], "LEZ memberships off", function () { lezBox.visible = false }) }
-                    LogosButton { text: "Save"; enabled: lzWallet.text.length > 0 && lzSeq.text.length > 8 && lzProg.text.trim().length === 64
-                        onClicked: root.act("setLez", [root.sel, JSON.stringify({ wallet: lzWallet.text.trim(), sequencer: lzSeq.text.trim(), program: lzProg.text.trim() })], "Saved", function () { lezBox.visible = false }) }
+                    LogosButton { text: "Save"; enabled: lzWallet.text.length > 0 && lzSeq.text.length > 8 && lzProg.text.trim().length === 64 && lzAdmin.text.trim().length > 30 && lzPrice.text.length > 0
+                        onClicked: root.act("setLez", [root.sel, JSON.stringify({ wallet: lzWallet.text.trim(), sequencer: lzSeq.text.trim(), program: lzProg.text.trim(), admin: lzAdmin.text.trim(), price: lzPrice.text, periodMs: lezBox.periods[lzPeriod.currentIndex].ms })], "Saving the terms on the chain…", function () { lezBox.visible = false }) }
                 }
             }
             Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }

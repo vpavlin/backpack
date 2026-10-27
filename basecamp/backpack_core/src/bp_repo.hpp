@@ -278,12 +278,26 @@ struct Repo {
         std::string w = cfg.value("wallet", ""), q = cfg.value("sequencer", ""), pr = cfg.value("program", ""), lib = cfg.value("lib", "");
         if (w.empty() || !fs::is_directory(w)) throw Err("the LEZ wallet folder doesn't exist");
         if (q.rfind("http://", 0) != 0 && q.rfind("https://", 0) != 0) throw Err("the sequencer is an http(s) address");
-        if (pr.size() != 64 || pr.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) throw Err("the program id is 64 hex characters");
-        s["members"]["lez"] = ojson{{"wallet", w}, {"sequencer", q}, {"program", pr}, {"lib", lib}, {"auto", cfg.value("auto", true)}}; save();
+        if (pr.size() != 64 || pr.find_first_not_of("0123456789abcdef") != std::string::npos) throw Err("the program id is 64 lowercase hex characters");
+        // the publisher's account: admin of this repo's config, and where the payments go
+        std::string admin = cfg.value("admin", ""), price = cfg.contains("price") ? (cfg["price"].is_string() ? cfg["price"].get<std::string>() : cfg["price"].dump()) : "";
+        int64_t period = cfg.value("periodMs", (int64_t)2592000000LL);   // a month (30 days) unless said otherwise
+        accountToHex(admin);   // throws if malformed
+        if (price.empty() || price.size() > 30 || price.find_first_not_of("0123456789") != std::string::npos) throw Err("the price is a whole number");
+        if (period < 60000) throw Err("the period is at least a minute");
+        s["members"]["lez"] = ojson{{"wallet", w}, {"sequencer", q}, {"program", pr}, {"lib", lib}, {"auto", cfg.value("auto", true)}, {"admin", admin}, {"price", price}, {"periodMs", period}}; save();
+    }
+    // the settings + this repo's config id, as bp_lez.hpp takes them
+    json lezCfg() const { json c = json::parse(s["members"]["lez"].dump()); c["config"] = lezConfigId(pub()); return c; }
+    // create the repo's config on the chain, or bring its price/period in line with the settings
+    json lezEnsure() {
+        if (!usesLez()) throw Err("this repo doesn't use LEZ memberships");
+        const auto& z = s["members"]["lez"];
+        return lezEnsureConfig(lezCfg(), z.value("admin", std::string()), z.value("price", std::string()), z.value("periodMs", (int64_t)0), log);
     }
     ojson lezAccess() const {
         const auto& z = s["members"]["lez"];
-        ojson a{{"via", "lez"}, {"program", z["program"]}, {"sequencer", z["sequencer"]}};
+        ojson a{{"via", "lez"}, {"program", z["program"]}, {"sequencer", z["sequencer"]}, {"config", lezConfigId(pub())}};
         if (s["members"].contains("lezTerms")) { a["price"] = s["members"]["lezTerms"]["price"]; a["periodMs"] = s["members"]["lezTerms"]["periodMs"]; }
         return a;
     }
@@ -308,7 +322,7 @@ struct Repo {
     // Read the memberships from the chain; keep the last good list if the chain can't be reached.
     json syncLez() {
         if (!usesLez()) throw Err("this repo doesn't use LEZ memberships");
-        LezSnapshot snap = lezRead(json::parse(s["members"]["lez"].dump()));
+        LezSnapshot snap = lezRead(lezCfg());
         ojson list = ojson::array(); int64_t now = nowMs(); size_t active = 0, devs = 0;
         for (auto& lm : snap.members) {
             ojson ds = ojson::array(); for (auto& d : lm.devices) ds.push_back(d);
@@ -461,7 +475,7 @@ struct Repo {
         json gets = json::array(); for (auto& u : s["pointers"]["get"]) gets.push_back(u.get<std::string>());
         json puts = json::array(); for (auto& u : s["pointers"]["put"]) { std::string t = u; puts.push_back(t.substr(0, t.find(':'))); }
         return json{{"slug", dir.filename().string()}, {"name", s.value("name", "")}, {"key", pub()}, {"seq", s.value("seq", 0)}, {"private", !readKey().empty() || isMembers()}, {"members", isMembers()}, {"memberDevices", isMembers() ? json::parse(s["members"]["devices"].dump()) : json::array()}, {"epoch", isMembers() ? json(s["members"].value("epoch", (uint64_t)0)) : json()},
-                    {"lez", usesLez() ? json{{"sequencer", s["members"]["lez"].value("sequencer", "")}, {"program", s["members"]["lez"].value("program", "")}, {"wallet", s["members"]["lez"].value("wallet", "")}, {"syncedAt", s["members"].value("lezSyncedAt", "")}, {"auto", lezAuto()}, {"terms", json::parse(s["members"].value("lezTerms", ojson::object()).dump())}, {"members", json::parse(s["members"].value("lezMembers", ojson::array()).dump())}} : json()},
+                    {"lez", usesLez() ? json{{"sequencer", s["members"]["lez"].value("sequencer", "")}, {"program", s["members"]["lez"].value("program", "")}, {"wallet", s["members"]["lez"].value("wallet", "")}, {"admin", s["members"]["lez"].value("admin", "")}, {"price", s["members"]["lez"].value("price", "")}, {"periodMs", s["members"]["lez"].value("periodMs", (int64_t)0)}, {"syncedAt", s["members"].value("lezSyncedAt", "")}, {"auto", lezAuto()}, {"terms", json::parse(s["members"].value("lezTerms", ojson::object()).dump())}, {"members", json::parse(s["members"].value("lezMembers", ojson::array()).dump())}} : json()},
                     {"pointerId", pointerId()}, {"node", s.value("node", std::string())}, {"nodeWarning", s.value("node", std::string()).empty() ? std::string("no Storage node set") : nodeWarning(s.value("node", std::string()))}, {"apps", apps}, {"pointersGet", gets}, {"pointersPut", puts}, {"hasLink", s.contains("lastLink")}, {"lastIndex", s.value("lastIndex", "")}};
     }
 };

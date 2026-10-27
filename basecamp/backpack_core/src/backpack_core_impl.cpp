@@ -214,8 +214,15 @@ std::string BackpackCoreImpl::setLez(std::string slug, std::string configJson) {
     try {
         json c = json::parse(configJson, nullptr, false); if (c.is_discarded() || !c.is_object()) return fail("The LEZ settings are a JSON object");
         bp::Repo r = bp::Repo::load(repoDir(slug)); r.setLez(c);
-        return ok(json{{"repo", r.summary()}, {"note", c.empty() ? "LEZ memberships off" : "Saved: Sync reads the memberships, publish gives their devices access"}});
+        if (c.empty()) return ok(json{{"repo", r.summary()}, {"note", "LEZ memberships off"}});
     } catch (std::exception& e) { return fail(e.what()); }
+    // then on the chain: create this repo's config (or update its price/period) and read its members
+    std::string dir = repoDir(slug);
+    return startJob("lez", slug, [this, dir](Job& j) {
+        BP_JOB_REPO(dir)
+        r.lezEnsure();
+        return r.syncLez().dump();
+    });
 }
 
 std::string BackpackCoreImpl::configure(std::string slug, std::string patchJson) {
