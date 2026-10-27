@@ -8,18 +8,18 @@
       },
       "locked": {
         "dir": "basecamp/backpack_core",
-        "lastModified": 1793102245,
-        "narHash": "sha256-9KssQ1cFxzfS1bw2B8XmZsrAo5E5UxPBcclOZ0xb63w=",
+        "lastModified": 1793112563,
+        "narHash": "sha256-qguRg2RP+ze85Bu5M/w/g0m9rERi1SxDF3//zj1ZmSM=",
         "owner": "vpavlin",
         "repo": "backpack",
-        "rev": "ebd4bfa71a671a7bb2fe87c862013da6d49d75dd",
+        "rev": "034fcfaaee75d581c8dbe5b690575fd9f9b5287e",
         "type": "github"
       },
       "original": {
         "dir": "basecamp/backpack_core",
         "owner": "vpavlin",
         "repo": "backpack",
-        "rev": "ebd4bfa71a671a7bb2fe87c862013da6d49d75dd",
+        "rev": "034fcfaaee75d581c8dbe5b690575fd9f9b5287e",
         "type": "github"
       }
     },

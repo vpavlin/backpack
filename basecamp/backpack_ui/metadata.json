@@ -2,7 +2,7 @@
   "name": "backpack",
   "display_name": "Backpack",
   "icon": "icon.png",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "ui_qml",
   "category": "tools",
   "description": "Publish Android app repos to Logos Storage for Backpack: add APKs or import F-Droid, publish, verify, share invite links, private repos.",

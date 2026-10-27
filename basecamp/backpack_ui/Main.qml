@@ -156,7 +156,7 @@ Item {
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 8; spacing: 2
                             RowLayout {
-                                T { text: (modelData.private ? "🔒 " : "") + (modelData.name || modelData.slug); font.bold: true; elide: Text.ElideRight; wrapMode: Text.NoWrap; Layout.fillWidth: true }
+                                T { text: (modelData.members ? "👥 " : modelData.private ? "🔒 " : "") + (modelData.name || modelData.slug); font.bold: true; elide: Text.ElideRight; wrapMode: Text.NoWrap; Layout.fillWidth: true }
                                 Rectangle { visible: !!modelData.busy; width: 8; height: 8; radius: 4; color: root.cWarn }
                             }
                             Sub { text: modelData.error ? modelData.error : ("#" + modelData.seq + " · " + modelData.appCount + " apps · " + modelData.slug); elide: Text.ElideRight; wrapMode: Text.NoWrap; Layout.fillWidth: true }
@@ -184,7 +184,8 @@ Item {
                         Layout.fillWidth: true; spacing: 4
                         RowLayout {
                             T { text: root.cur ? root.cur.name : ""; font.pixelSize: 22; font.bold: true }
-                            Badge { visible: !!(root.cur && root.cur.private); text: "🔒 private"; tone: root.cWarn }
+                            Badge { visible: !!(root.cur && root.cur.private && !root.cur.members); text: "🔒 private"; tone: root.cWarn }
+                            Badge { visible: !!(root.cur && root.cur.members); text: "👥 members · " + (root.cur && root.cur.memberDevices ? root.cur.memberDevices.length : 0) + " devices"; tone: root.cAccent }
                             Badge { visible: !!(root.cur && !root.cur.private); text: "public"; tone: root.cOk }
                             Badge { visible: !!(root.cur && root.cur.busy); text: "working…"; tone: root.cAccent }
                         }
@@ -201,7 +202,9 @@ Item {
                     LogosButton { text: "Publish"; enabled: !!root.cur && !root.cur.busy; onClicked: root.act("publish", [root.sel, "0"], "Publishing…") }
                     LogosButton { text: "Verify"; enabled: !!root.cur && !root.cur.busy; onClicked: root.act("verify", [root.sel, "1"], "Checking every APK the way a phone does…") }
                     LogosButton { text: "Invite link"; enabled: !!root.cur && root.cur.hasLink; onClicked: linkDialog.show() }
+                    LogosButton { text: "Members"; visible: !!(root.cur && root.cur.members); enabled: !!root.cur && !root.cur.busy; onClicked: membersDialog.open() }
                     LogosButton {
+                        visible: !(root.cur && root.cur.members)
                         text: root.cur && root.cur.private ? "Rotate read key" : "Make private"
                         enabled: !!root.cur && !root.cur.busy
                         onClicked: confirmDialog.ask(root.cur.private
@@ -308,7 +311,7 @@ Item {
     Popup {
         id: newDialog; modal: true; anchors.centerIn: parent; width: 440; padding: 18
         background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
-        onOpened: { nName.text = ""; nSlug.text = ""; nSlug.edited = false; nPriv.checked = false; nNode.text = root.st.lastNode || ""; nNodeMsg.text = ""; nName.forceActiveFocus() }
+        onOpened: { nName.text = ""; nSlug.text = ""; nSlug.edited = false; nKind.kind = "0"; nNode.text = root.st.lastNode || ""; nNodeMsg.text = ""; nName.forceActiveFocus() }
         ColumnLayout {
             width: parent.width; spacing: 10
             T { text: "New repo"; font.bold: true; font.pixelSize: 17 }
@@ -323,12 +326,25 @@ Item {
                 LogosButton { Layout.preferredWidth: 120; text: "Test"; enabled: nNode.text.length > 8; onClicked: root.testNode(nNode.text.trim(), nNodeMsg) }
             }
             Sub { id: nNodeMsg; Layout.fillWidth: true; visible: text !== "" }
-            CheckBox { id: nPriv; text: "Private: only people with the invite link can read it"; contentItem: Text { leftPadding: 28; text: nPriv.text; color: root.cText; font.pixelSize: 13; textFormat: Text.PlainText; verticalAlignment: Text.AlignVCenter } }
+            Sub { text: "Who can read it" }
+            ColumnLayout {
+                id: nKind; property string kind: "0"; spacing: 2
+                Repeater {
+                    model: [{ k: "0", t: "Public: anyone with the link" },
+                            { k: "1", t: "Private: only people with the invite link (the link carries the read key)" },
+                            { k: "2", t: "Members: only devices you add (the link carries no key; you add each phone's member code)" }]
+                    RadioButton {
+                        checked: nKind.kind === modelData.k; onClicked: nKind.kind = modelData.k; text: modelData.t
+                        contentItem: Text { leftPadding: 28; text: parent.text; color: root.cText; font.pixelSize: 13; textFormat: Text.PlainText; wrapMode: Text.Wrap; verticalAlignment: Text.AlignVCenter }
+                        Layout.fillWidth: true
+                    }
+                }
+            }
             RowLayout {
                 Item { Layout.fillWidth: true }
                 LogosButton { text: "Cancel"; onClicked: newDialog.close() }
                 LogosButton { text: "Create"; enabled: nName.text.length > 0 && nSlug.text.length > 0
-                    onClicked: { var slug = nSlug.text; root.act("createRepo", [slug, nName.text, nPriv.checked ? "1" : "0", nNode.text.trim()], "Repo created", function () { root.sel = slug; newDialog.close() }) } }
+                    onClicked: { var slug = nSlug.text; root.act("createRepo", [slug, nName.text, nKind.kind, nNode.text.trim()], "Repo created", function () { root.sel = slug; newDialog.close() }) } }
             }
         }
     }
@@ -363,7 +379,7 @@ Item {
             root.core("link", [root.sel], function (raw) {
                 var r = root.parse(raw)
                 if (!r || r.ok === false) { root.toast(r ? r.error : "No answer", true); return }
-                linkDialog.link = r.link; linkDialog.priv = r.private; linkDialog.qr = r.qr; qrCanvas.requestPaint(); linkDialog.open()
+                linkDialog.link = r.link; linkDialog.priv = r.private && !(root.cur && root.cur.members); linkDialog.qr = r.qr; qrCanvas.requestPaint(); linkDialog.open()
             })
         }
         onClosed: { link = ""; qr = null }
@@ -371,6 +387,7 @@ Item {
             width: parent.width; spacing: 10
             T { text: "Invite link"; font.bold: true; font.pixelSize: 17 }
             Sub { visible: linkDialog.priv; color: root.cWarn; Layout.fillWidth: true; text: "🔒 This link carries the READ KEY: whoever has it can read the repo. Share it only with people you mean to, and not in public chats." }
+            Sub { visible: !!(root.cur && root.cur.members); Layout.fillWidth: true; text: "👥 Members repo: this link carries no key. It works only on devices you added under Members (after a publish); others see \"not a member\"." }
             Sub { visible: !linkDialog.priv; Layout.fillWidth: true; text: "Open it on the phone (or scan the code in Backpack: + Repo) to add the repo." }
             Canvas {
                 id: qrCanvas; Layout.alignment: Qt.AlignHCenter; width: 260; height: 260
@@ -386,6 +403,47 @@ Item {
                 Item { Layout.fillWidth: true }
                 LogosButton { text: "Copy link"; onClicked: root.copyText(linkDialog.link) }
                 LogosButton { text: "Close"; onClicked: linkDialog.close() }
+            }
+        }
+    }
+
+    // ── members (ADR 0013): the devices that get this repo's read key, wrapped for each at publish
+    Popup {
+        id: membersDialog; modal: true; anchors.centerIn: parent; width: 600; padding: 18
+        background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        onOpened: { mCode.text = "" }
+        ColumnLayout {
+            width: parent.width; spacing: 10
+            T { text: "Members"; font.bold: true; font.pixelSize: 17 }
+            Sub { Layout.fillWidth: true; text: "Each device here gets the read key, wrapped for it alone, at the next publish. The key changes every hour and whenever you remove a device, so a removed device can't read new versions (what it already has stays its own)." }
+            ListView {
+                Layout.fillWidth: true; Layout.preferredHeight: Math.min(contentHeight, 280); clip: true; spacing: 6
+                model: root.cur && root.cur.memberDevices ? root.cur.memberDevices : []
+                delegate: RowLayout {
+                    width: ListView.view.width
+                    ColumnLayout {
+                        Layout.fillWidth: true; Layout.preferredWidth: 1; spacing: 1
+                        T { text: modelData.name; font.bold: true }
+                        Sub { text: "key " + root.keyShort(modelData.pk) + (modelData.added ? " · added " + modelData.added.slice(0, 10) : "") }
+                    }
+                    LogosButton { Layout.preferredWidth: 110; text: "Remove"; enabled: !!root.cur && !root.cur.busy
+                        onClicked: { var pk = modelData.pk, nm = modelData.name
+                            confirmDialog.ask("Remove " + nm + "? After the next publish it can't read new versions.", function () { root.act("removeMember", [root.sel, pk], "Removed: publish to apply it") }) } }
+                }
+            }
+            Sub { visible: !(root.cur && root.cur.memberDevices && root.cur.memberDevices.length); text: "No devices yet." }
+            Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
+            Sub { Layout.fillWidth: true; text: "Add a device: in Backpack on the phone, Settings → This phone's member code → Copy link, and paste it here (backpack://member?…). It isn't secret." }
+            RowLayout {
+                Layout.fillWidth: true
+                DField { id: mCode; placeholderText: "backpack://member?pk=…&n=…" }
+                LogosButton { Layout.preferredWidth: 110; text: "Add"; enabled: mCode.text.indexOf("backpack://member?") >= 0
+                    onClicked: root.act("addMember", [root.sel, mCode.text.trim()], "Added: publish to give it access", function () { mCode.text = "" }) }
+            }
+            RowLayout {
+                Item { Layout.fillWidth: true }
+                LogosButton { text: "Publish now"; enabled: !!root.cur && !root.cur.busy; onClicked: { root.act("publish", [root.sel, "0"], "Publishing…"); membersDialog.close() } }
+                LogosButton { text: "Close"; onClicked: membersDialog.close() }
             }
         }
     }
