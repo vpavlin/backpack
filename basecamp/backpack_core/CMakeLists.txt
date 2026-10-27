@@ -30,9 +30,10 @@ logos_module(
         src/bp_sign.hpp
         src/bp_keys.hpp
         src/bp_members.hpp
+        src/bp_lez.hpp
         src/qrcodegen.hpp
         src/qrcodegen.cpp
     INCLUDE_DIRS src
     FIND_PACKAGES OpenSSL ZLIB
-    LINK_LIBRARIES OpenSSL::Crypto ZLIB::ZLIB Qt6::Network
+    LINK_LIBRARIES OpenSSL::Crypto ZLIB::ZLIB Qt6::Network ${CMAKE_DL_LIBS}
 )

@@ -34,6 +34,8 @@ public:
     // (backpack://member?pk=...), remove one by its key. Takes effect at the next publish.
     std::string addMember(std::string slug, std::string memberLink);
     std::string removeMember(std::string slug, std::string devicePk);
+    std::string setLez(std::string slug, std::string configJson);
+    std::string syncLez(std::string slug);
     // Does a Storage node answer? {"ok":true,"peerId":..,"addrs":[..],"warning":".."}
     std::string testNode(std::string url);
     std::string repo(std::string slug);

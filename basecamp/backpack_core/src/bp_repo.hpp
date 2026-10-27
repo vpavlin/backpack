@@ -5,6 +5,7 @@
 #include "bp_apk.hpp"
 #include "bp_http.hpp"
 #include "bp_members.hpp"
+#include "bp_lez.hpp"
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -268,13 +269,48 @@ struct Repo {
         std::vector<ojson> keep; for (auto& d : s["members"]["devices"]) if (d["pk"] != pk) keep.push_back(d);
         s["members"]["devices"] = ojson(keep); save();
     }
+    // ---- LEZ memberships (ADR 0010): paid-up memberships' devices are members too ----
+    static int64_t nowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+    void setLez(const json& cfg) {
+        if (!isMembers()) throw Err("this isn't a member repo");
+        if (cfg.is_null() || (cfg.is_object() && cfg.empty())) { s["members"].erase("lez"); s["members"].erase("lezMembers"); save(); return; }
+        std::string w = cfg.value("wallet", ""), q = cfg.value("sequencer", ""), pr = cfg.value("program", ""), lib = cfg.value("lib", "");
+        if (w.empty() || !fs::is_directory(w)) throw Err("the LEZ wallet folder doesn't exist");
+        if (q.rfind("http://", 0) != 0 && q.rfind("https://", 0) != 0) throw Err("the sequencer is an http(s) address");
+        if (pr.size() != 64 || pr.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) throw Err("the program id is 64 hex characters");
+        s["members"]["lez"] = ojson{{"wallet", w}, {"sequencer", q}, {"program", pr}, {"lib", lib}}; save();
+    }
+    bool usesLez() const { return isMembers() && s["members"].contains("lez") && s["members"]["lez"].is_object(); }
+    // Read the memberships from the chain; keep the last good list if the chain can't be reached.
+    json syncLez() {
+        if (!usesLez()) throw Err("this repo doesn't use LEZ memberships");
+        LezSnapshot snap = lezRead(json::parse(s["members"]["lez"].dump()));
+        ojson list = ojson::array(); int64_t now = nowMs(); size_t active = 0, devs = 0;
+        for (auto& lm : snap.members) {
+            ojson ds = ojson::array(); for (auto& d : lm.devices) ds.push_back(d);
+            list.push_back(ojson{{"owner", lm.owner}, {"devices", ds}, {"paidThroughMs", lm.paidThroughMs}});
+            if (lm.paidThroughMs > now) { active++; devs += lm.devices.size(); }
+        }
+        s["members"]["lezMembers"] = list; s["members"]["lezSyncedAt"] = nowIso(); save();
+        log("LEZ: " + std::to_string(snap.members.size()) + " membership(s), " + std::to_string(active) + " paid up, " + std::to_string(devs) + " device(s)");
+        return json{{"memberships", snap.members.size()}, {"active", active}, {"devices", devs}, {"config", snap.config}};
+    }
+    // Manual devices + devices of memberships paid through now (expiry is checked here, at publish time).
+    std::vector<std::string> memberPks() const {
+        std::vector<std::string> pks; for (auto& d : s["members"]["devices"]) pks.push_back(d["pk"]);
+        int64_t now = nowMs();
+        if (s["members"].contains("lezMembers")) for (auto& lm : s["members"]["lezMembers"]) if (lm.value("paidThroughMs", (int64_t)0) > now) for (auto& d : lm["devices"]) pks.push_back(d);
+        std::sort(pks.begin(), pks.end()); pks.erase(std::unique(pks.begin(), pks.end()), pks.end());
+        return pks;
+    }
+
     // A new epoch key and key bundle when the epoch moved on or the members changed.
     void rotateMembersIfNeeded(const Key& k, Node& n) {
+        if (usesLez()) { try { syncLez(); } catch (std::exception& e) { log(std::string("LEZ unreachable, using the last list: ") + e.what()); } }
         auto& m = s["members"];
         int64_t len = std::max<int64_t>(60000, m.value("epochLenMs", 3600000LL));
-        int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        uint64_t epoch = (uint64_t)(nowMs / len);
-        std::vector<std::string> pks; for (auto& d : m["devices"]) pks.push_back(d["pk"]); std::sort(pks.begin(), pks.end());
+        uint64_t epoch = (uint64_t)(nowMs() / len);
+        std::vector<std::string> pks = memberPks();
         std::string devHash; for (auto& p : pks) devHash += p; devHash = sha256hex(devHash);
         if (m.contains("epochKey") && m.value("epoch", (uint64_t)0) == epoch && m.value("devHash", "") == devHash) return;
         std::string ek = newKey(); std::string K = k.pub();
@@ -390,6 +426,7 @@ struct Repo {
         json gets = json::array(); for (auto& u : s["pointers"]["get"]) gets.push_back(u.get<std::string>());
         json puts = json::array(); for (auto& u : s["pointers"]["put"]) { std::string t = u; puts.push_back(t.substr(0, t.find(':'))); }
         return json{{"slug", dir.filename().string()}, {"name", s.value("name", "")}, {"key", pub()}, {"seq", s.value("seq", 0)}, {"private", !readKey().empty() || isMembers()}, {"members", isMembers()}, {"memberDevices", isMembers() ? json::parse(s["members"]["devices"].dump()) : json::array()}, {"epoch", isMembers() ? json(s["members"].value("epoch", (uint64_t)0)) : json()},
+                    {"lez", usesLez() ? json{{"sequencer", s["members"]["lez"].value("sequencer", "")}, {"program", s["members"]["lez"].value("program", "")}, {"wallet", s["members"]["lez"].value("wallet", "")}, {"syncedAt", s["members"].value("lezSyncedAt", "")}, {"members", json::parse(s["members"].value("lezMembers", ojson::array()).dump())}} : json()},
                     {"pointerId", pointerId()}, {"node", s.value("node", std::string())}, {"nodeWarning", s.value("node", std::string()).empty() ? std::string("no Storage node set") : nodeWarning(s.value("node", std::string()))}, {"apps", apps}, {"pointersGet", gets}, {"pointersPut", puts}, {"hasLink", s.contains("lastLink")}, {"lastIndex", s.value("lastIndex", "")}};
     }
 };

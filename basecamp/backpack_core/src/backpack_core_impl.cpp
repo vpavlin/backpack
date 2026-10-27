@@ -144,6 +144,17 @@ std::string BackpackCoreImpl::removeMember(std::string slug, std::string deviceP
     catch (std::exception& e) { return fail(e.what()); }
 }
 
+// LEZ memberships (ADR 0010): {"wallet","sequencer","program","lib"}; {} turns it off
+std::string BackpackCoreImpl::setLez(std::string slug, std::string configJson) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!validSlug(slug) || m_busyRepo.count(slug)) return fail("The repo is busy");
+    try {
+        json c = json::parse(configJson, nullptr, false); if (c.is_discarded() || !c.is_object()) return fail("The LEZ settings are a JSON object");
+        bp::Repo r = bp::Repo::load(repoDir(slug)); r.setLez(c);
+        return ok(json{{"repo", r.summary()}, {"note", c.empty() ? "LEZ memberships off" : "Saved: Sync reads the memberships, publish gives their devices access"}});
+    } catch (std::exception& e) { return fail(e.what()); }
+}
+
 std::string BackpackCoreImpl::configure(std::string slug, std::string patchJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!validSlug(slug) || m_busyRepo.count(slug)) return fail("The repo is busy");
@@ -274,6 +285,14 @@ std::string BackpackCoreImpl::verify(std::string slug, std::string deep) {
         if (!res.value("ok", false)) throw bp::Err("problems found: see the log");
         r.log("All good");
         return res.dump();
+    });
+}
+
+std::string BackpackCoreImpl::syncLez(std::string slug) {
+    std::string dir = repoDir(slug);
+    return startJob("lez", slug, [this, dir](Job& j) {
+        BP_JOB_REPO(dir)
+        return r.syncLez().dump();
     });
 }
 

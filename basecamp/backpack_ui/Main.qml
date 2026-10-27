@@ -97,6 +97,7 @@ Item {
     Component.onCompleted: root.refresh()
 
     // ── helpers
+    function lezActive(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i].paidThroughMs > Date.now()) n++; return n }
     function keyShort(k) { return k ? k.slice(0, 6) + "…" + k.slice(-4) : "" }
     function mb(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " kB" }
     // Test a Storage node and show the outcome in `label`
@@ -119,7 +120,7 @@ Item {
     Timer { id: toastTimer; interval: 4500; onTriggered: root.toastText = "" }
 
     component DField: TextField {
-        Layout.fillWidth: true; color: root.cText; placeholderTextColor: root.cFaint; font.pixelSize: 14; selectByMouse: true
+        Layout.fillWidth: true; Layout.preferredWidth: 1; color: root.cText; placeholderTextColor: root.cFaint; font.pixelSize: 14; selectByMouse: true
         background: Rectangle { radius: 6; color: root.cBg; border.width: 1; border.color: parent.activeFocus ? root.cAccent : root.cLine }
     }
     component T: Text { color: root.cText; font.pixelSize: 14; textFormat: Text.PlainText; wrapMode: Text.Wrap }
@@ -409,7 +410,7 @@ Item {
 
     // ── members (ADR 0013): the devices that get this repo's read key, wrapped for each at publish
     Popup {
-        id: membersDialog; modal: true; anchors.centerIn: parent; width: 600; padding: 18
+        id: membersDialog; modal: true; anchors.centerIn: parent; width: 700; padding: 18
         background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
         onOpened: { mCode.text = "" }
         ColumnLayout {
@@ -433,6 +434,42 @@ Item {
             }
             Sub { visible: !(root.cur && root.cur.memberDevices && root.cur.memberDevices.length); text: "No devices yet." }
             Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
+            RowLayout {
+                Layout.fillWidth: true
+                T { text: "Paid memberships (LEZ)"; font.bold: true; Layout.fillWidth: true }
+                Text { text: lezBox.visible ? "hide settings" : "settings"; color: root.cAccent; font.pixelSize: 12; textFormat: Text.PlainText
+                       MouseArea { anchors.fill: parent; onClicked: lezBox.visible = !lezBox.visible } }
+            }
+            Sub { Layout.fillWidth: true; visible: !(root.cur && root.cur.lez); text: "Off. With it on, everyone who pays for a membership on the Logos Execution Zone gets their devices added here automatically, until it runs out." }
+            Sub { Layout.fillWidth: true; visible: !!(root.cur && root.cur.lez)
+                  text: root.cur && root.cur.lez ? (root.cur.lez.members.length + " membership(s) · " + root.lezActive(root.cur.lez.members) + " paid up · last read " + (root.cur.lez.syncedAt ? root.cur.lez.syncedAt.slice(0, 16).replace("T", " ") : "never") + " · read again at every publish") : "" }
+            ListView {
+                Layout.fillWidth: true; Layout.preferredHeight: Math.min(contentHeight, 140); clip: true; spacing: 4
+                model: root.cur && root.cur.lez ? root.cur.lez.members : []
+                delegate: Sub {
+                    width: ListView.view.width
+                    property bool active: modelData.paidThroughMs > Date.now()
+                    color: active ? root.cText : root.cFaint
+                    text: root.keyShort(modelData.owner) + " · " + modelData.devices.length + " device(s) · " + (active ? "paid through " : "expired ") + new Date(modelData.paidThroughMs).toLocaleString(Qt.locale(), "yyyy-MM-dd HH:mm")
+                }
+            }
+            ColumnLayout {
+                id: lezBox; visible: false; Layout.fillWidth: true; spacing: 6
+                onVisibleChanged: if (visible) { lzWallet.text = root.cur && root.cur.lez ? root.cur.lez.wallet : ""; lzSeq.text = root.cur && root.cur.lez ? root.cur.lez.sequencer : ""; lzProg.text = root.cur && root.cur.lez ? root.cur.lez.program : "" }
+                Sub { text: "Wallet folder (reads only; it pays nothing here)" }
+                DField { id: lzWallet; placeholderText: "/home/me/.backpack-lez/ops-wallet" }
+                Sub { text: "Sequencer" }
+                DField { id: lzSeq; placeholderText: "http://sequencer.example:3040/" }
+                Sub { text: "backpack-access program id (64 hex)" }
+                DField { id: lzProg; placeholderText: "cb23…" }
+                RowLayout {
+                    Item { Layout.fillWidth: true }
+                    LogosButton { text: "Turn off"; visible: !!(root.cur && root.cur.lez); onClicked: root.act("setLez", [root.sel, "{}"], "LEZ memberships off", function () { lezBox.visible = false }) }
+                    LogosButton { text: "Save"; enabled: lzWallet.text.length > 0 && lzSeq.text.length > 8 && lzProg.text.trim().length === 64
+                        onClicked: root.act("setLez", [root.sel, JSON.stringify({ wallet: lzWallet.text.trim(), sequencer: lzSeq.text.trim(), program: lzProg.text.trim() })], "Saved", function () { lezBox.visible = false }) }
+                }
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
             Sub { Layout.fillWidth: true; text: "Add a device: in Backpack on the phone, Settings → This phone's member code → Copy link, and paste it here (backpack://member?…). It isn't secret." }
             RowLayout {
                 Layout.fillWidth: true
@@ -442,6 +479,7 @@ Item {
             }
             RowLayout {
                 Item { Layout.fillWidth: true }
+                LogosButton { text: "Read memberships"; visible: !!(root.cur && root.cur.lez); enabled: !!root.cur && !root.cur.busy; onClicked: root.act("syncLez", [root.sel], "Reading memberships from LEZ…") }
                 LogosButton { text: "Publish now"; enabled: !!root.cur && !root.cur.busy; onClicked: { root.act("publish", [root.sel, "0"], "Publishing…"); membersDialog.close() } }
                 LogosButton { text: "Close"; onClicked: membersDialog.close() }
             }
