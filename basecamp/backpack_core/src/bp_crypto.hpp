@@ -114,12 +114,13 @@ inline std::string decBody(const std::string& readKey, const std::string& body) 
 
 // ---- envelopes --------------------------------------------------------------------------------------
 // kind: "index" (no kind field) or "pointer". Returns the envelope as compact JSON text.
-inline std::string seal(const std::string& kind, const json& body, const Key& key, const std::string& readKey = "") {
+template <class J>
+inline std::string seal(const std::string& kind, const J& body, const Key& key, const std::string& readKey = "") {
     std::string text = body.dump();
     std::string b = readKey.empty() ? text : encBody(readKey, text);
-    json env = json::object(); env["backpack"] = 1;
+    nlohmann::ordered_json env = nlohmann::ordered_json::object(); env["backpack"] = 1;
     if (kind != "index") env["kind"] = kind;
-    if (!readKey.empty()) { env["enc"] = "a256gcm"; if (kind == "pointer") env["key"] = body.value("key", ""); }
+    if (!readKey.empty()) { env["enc"] = "a256gcm"; if (kind == "pointer") env["key"] = body.value("key", std::string()); }
     env["body"] = b; env["sig"] = key.sign(b);
     return env.dump();
 }
