@@ -14,3 +14,4 @@
 - [0011](0011-basecamp-app.md): Backpack for Basecamp — backpack_core + backpack_ui, publisher and member roles (proposed).
 - [0012](0012-keycard.md): Keycard for Backpack's keys — repo key on Keycard (secp256k1), APK keys locked by a Keycard tap (proposed, not scheduled).
 - [0014](0014-paid-repos-decisions-2026-10.md): paid repos — the decisions of October 2026 (Basecamp-only flows, monthly terms, joins publish, notes over Delivery, no copy protection, a new key per publish) and the ideas left for later.
+- [0015](0015-lns-names-for-publishers.md): LNS names for publishers — follow a repo by name, "published by" only when the name and the repo agree; a name finds a repo, the pinned key keeps it; in Backpack now, loam identity later (proposed).
