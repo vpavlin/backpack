@@ -8,11 +8,20 @@
   "category": "tools",
   "description": "Publishes Backpack app repos to Logos Storage: create a repo, add APKs or import an F-Droid repo, publish signed (optionally private, encrypted) indexes, verify, share the invite link. Same repos as the backpack CLI.",
   "main": "backpack_core_plugin",
-  "dependencies": [],
+  "dependencies": [
+    "loam_core",
+    "delivery_module"
+  ],
   "nix": {
     "packages": {
-      "build": ["openssl", "zlib"],
-      "runtime": ["openssl", "zlib"]
+      "build": [
+        "openssl",
+        "zlib"
+      ],
+      "runtime": [
+        "openssl",
+        "zlib"
+      ]
     },
     "external_libraries": [],
     "cmake": {

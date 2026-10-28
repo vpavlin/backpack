@@ -32,7 +32,8 @@ device in a signed **key bundle** on Logos Storage.
   The AAD binds a blob to one repo, one device and one epoch: it can't be replayed elsewhere.
 - **Pointer.** A member repo's pointer is a normal signed (not encrypted) pointer whose body also names
   the bundle: `{…, "keys": <bundle CID>, "epoch": n}`. It travels on the repo-key topic (ADR 0007): the
-  repo's existence isn't secret, anyone may become a member.
+  repo's existence isn't secret, anyone may become a member. Since backpack_core 0.4.0 Basecamp sends it
+  there itself, so a members repo needs no web address and no CLI step (ADR 0007, 2026-10-28).
 - **Link.** `backpack://repo?…&m=1`: no read key. A forwarded link is useless without membership.
 - **Phone.** Fetch the pointer → fetch the bundle (verify its signature with the repo key, epoch = the
   pointer's) → find its own pk → unwrap → decrypt the index → as a private repo. No entry: "you're not a

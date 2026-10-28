@@ -164,7 +164,7 @@ export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgr
   if (!raw) throw new Error("the index is empty or larger than 1 MB: refusing");
   const env = JSON.parse(raw);
   // a member repo's key only arrives with its update note: none reachable = no key, whatever the membership
-  if (env?.enc && repo.members && !repo.readKey && !ptr) throw new Error("couldn't reach this repo's update note, and your key comes with it: try again later, or ask the publisher to give the repo a web address for it");
+  if (env?.enc && repo.members && !repo.readKey && !ptr) throw new Error("couldn't reach this repo's update note, and your key comes with it: it comes over Logos Delivery, so make sure the Loam app is running, then try again");
   const index =validateIndex(openEnvelope(env, repo.key, "index", repo.readKey), repo.key);
   const seq = index.seq;
   if (seq < have) throw new Error(`this index is older than the one you have (seq ${seq} < ${have}): refusing`);

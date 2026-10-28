@@ -350,8 +350,6 @@ struct Repo {
     // A new epoch key and key bundle when the epoch moved on or the members changed.
     void rotateMembersIfNeeded(const Key& k, Node& n) {
         if (usesLez()) { try { syncLez(); } catch (std::exception& e) { log(std::string("LEZ unreachable, using the last list: ") + e.what()); } }
-        if (s["pointers"]["get"].empty() || s["pointers"]["put"].empty())
-            log("Warning: phones get a members repo's key from the update note, and this repo's note has " + std::string(s["pointers"]["get"].empty() ? "no web address" : "nowhere to be sent") + ": no phone can read it");
         auto& m = s["members"];
         int64_t len =std::max<int64_t>(60000, m.value("epochLenMs", 3600000LL));
         uint64_t epoch = (uint64_t)(nowMs() / len);

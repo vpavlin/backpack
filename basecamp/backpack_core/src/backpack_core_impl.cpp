@@ -4,6 +4,10 @@
 #include "bp_keys.hpp"
 #include "bp_subs.hpp"
 #include "qrcodegen.hpp"
+#include "logos_sdk.h"   // generated: modules().loam_core / modules().delivery_module
+#include <QObject>
+#include <QTimer>
+#include <condition_variable>
 #include <cstdlib>
 
 using bp::json;
@@ -33,7 +37,10 @@ void BackpackCoreImpl::onContextReady() {
     else if (const char* h = std::getenv("HOME")) m_dataDir = std::string(h) + "/.backpack";
     else m_dataDir = ".backpack";
     loadPrefs();
+    if (!m_loop) m_loop = new QObject();   // lives on this (the module's) event-loop thread
     startWatcher();
+    // calls to other modules wait until the module has loaded (the runtime rejects them from here)
+    QTimer::singleShot(8000, m_loop, [this] { announceDue(); });
 }
 
 // Paid repos publish themselves when someone joins or a device is taken off (not when a membership only
@@ -55,6 +62,7 @@ void BackpackCoreImpl::startWatcher() {
                         if (bp::fs::exists(e.path() / "repo.json") && bp::fs::exists(e.path() / "key.pem")) slugs.push_back(e.path().filename().string());
             }
             for (auto& slug : slugs) watchOnce(slug);
+            announceDue();
         }
     }).detach();
 }
@@ -81,9 +89,172 @@ void BackpackCoreImpl::watchOnce(const std::string& slug) {
         BP_JOB_REPO(dir)
         r.log("LEZ: " + why + ": publishing");
         json res = r.publish(false);
-        r.log("Published #" + std::to_string(res.value("seq", 0)));
+        r.log("Published #" + std::to_string(res.value("seq", 0)) + "; the update note goes out over Delivery");
+        if (!res.value("unchanged", false)) announce(r.dir.filename().string());
         return res.dump();
     });
+}
+
+// ── Logos Delivery: update notes out (loam_core), followed repos' notes in (Store) ──────────────────
+namespace {
+const long long kResendSec = 12 * 3600;   // Store keeps a message for a limited time: send it again
+const char* kPreset = "logos.test";        // the network Backpack phones are on (cluster 2)
+const int kCluster = 2, kShards = 8;
+const char* kEntry[] = {
+    "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
+    "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
+    "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
+    "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
+    "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
+    "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV",
+};
+std::string noteTopic(const std::string& id) { return "/backpack/1/" + id + "/json"; }
+// the shard a content topic lands on (autosharding: sha256(app + version), last 8 bytes, mod shards)
+std::string pubsubTopicFor(const std::string& contentTopic) {
+    std::vector<std::string> parts; size_t i = 1;
+    while (i <= contentTopic.size()) { size_t j = contentTopic.find('/', i); parts.push_back(contentTopic.substr(i, j == std::string::npos ? std::string::npos : j - i)); if (j == std::string::npos) break; i = j + 1; }
+    std::string a = parts.size() > 1 ? parts[0] + parts[1] : contentTopic;
+    bp::Bytes d = bp::sha256((const unsigned char*)a.data(), a.size());
+    uint64_t v = 0; for (int k = 24; k < 32; k++) v = v << 8 | d[k];
+    return "/waku/2/rs/" + std::to_string(kCluster) + "/" + std::to_string(v % kShards);
+}
+long long nowSec() { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+// A note as it comes back: the signed JSON, possibly base64-wrapped once or twice by the senders' layers.
+void noteCandidates(const std::string& bytes, std::vector<std::string>& out) {
+    std::string cur = bytes;
+    for (int depth = 0; depth < 3 && cur.size() <= 16384; depth++) {
+        size_t f = cur.find_first_not_of(" \t\r\n");
+        if (f != std::string::npos && cur[f] == '{') { out.push_back(cur); return; }
+        try { bp::Bytes b = bp::unb64url(cur); cur.assign(b.begin(), b.end()); } catch (...) { return; }
+    }
+}
+}  // namespace
+
+void BackpackCoreImpl::onLoop(std::function<void()> fn) {
+    if (m_loop) QTimer::singleShot(0, m_loop, std::move(fn));
+}
+
+// Every published repo whose note hasn't gone out in the last 12 hours (all of them after a start).
+void BackpackCoreImpl::announceDue() {
+    std::vector<std::string> due;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        std::error_code ec; long long now = nowSec();
+        if (bp::fs::is_directory(m_dataDir, ec))
+            for (auto& e : bp::fs::directory_iterator(m_dataDir, ec)) {
+                std::string slug = e.path().filename().string();
+                if (!bp::fs::exists(e.path() / "latest.json") || !bp::fs::exists(e.path() / "key.pem")) continue;
+                if (now - m_netSentAt[slug] >= kResendSec) due.push_back(slug);
+            }
+    }
+    for (auto& s : due) announce(s);
+}
+
+// Queue the repo's current note (latest.json, already signed) for Delivery. Any thread.
+void BackpackCoreImpl::announce(const std::string& slug) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    try {
+        bp::Repo r = bp::Repo::load(repoDir(slug));
+        std::string text = bp::readFile((bp::fs::path(repoDir(slug)) / "latest.json").string());
+        if (text.empty() || text.size() > 8192) return;
+        std::string topic = noteTopic(r.pointerId());
+        for (auto it = m_netQueue.begin(); it != m_netQueue.end(); ) it = it->first == topic ? m_netQueue.erase(it) : it + 1;
+        m_netQueue.emplace_back(topic, text);
+        m_netSentAt[slug] = nowSec();
+    } catch (...) { return; }
+    onLoop([this] { netFlush(); });
+}
+
+// Bring up the shared node once (loop thread). Another app may have started it already: then
+// start() only re-announces its status.
+void BackpackCoreImpl::netStart() {
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        if (m_netStarted) return;
+        m_netStarted = true; m_netStatus = "starting";
+    }
+    json cfg{{"logLevel", "INFO"}, {"mode", "Core"}, {"preset", kPreset}, {"relay", true}, {"entryNodes", json::array()}};
+    for (auto e : kEntry) cfg["entryNodes"].push_back(e);
+    // phones read notes from plain relay (and Store), not SDS channels
+    modules().loam_core.setTopicModeAsync("/backpack/", "relay", [](std::string) {});
+    modules().loam_core.onStatusChanged([this](const std::string& st) {
+        onLoop([this, st] {
+            { std::lock_guard<std::recursive_mutex> lk(m_mtx); m_netStatus = st; }
+            if (st == "Connected") netFlush();
+        });
+    });
+    modules().loam_core.startAsync(cfg.dump(), [this](std::string err) {
+        if (err.empty()) return;
+        onLoop([this, err] { std::lock_guard<std::recursive_mutex> lk(m_mtx); m_netStatus = "error: " + err; m_netStarted = false; });
+    });
+}
+
+// Send what's queued once the node is up (loop thread).
+void BackpackCoreImpl::netFlush() {
+    std::deque<std::pair<std::string, std::string>> q;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        if (!m_netStarted) { onLoop([this] { netStart(); }); return; }
+        if (m_netStatus != "Connected" || m_netQueue.empty()) return;
+        q.swap(m_netQueue);
+    }
+    for (auto& [topic, text] : q) {
+        std::string b64 = bp::b64std(bp::Bytes(text.begin(), text.end()));
+        auto send = [this, topic, b64] {
+            modules().loam_core.sendSealedAsync(topic, b64, [this, topic](std::string err) {
+                std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                m_netSent[topic] = err.empty() ? bp::nowIso() : "failed: " + err;
+            });
+        };
+        bool joined; { std::lock_guard<std::recursive_mutex> lk(m_mtx); joined = m_netJoined.count(topic) > 0; }
+        if (joined) send();
+        else modules().loam_core.joinAsync(topic, [this, topic, send](std::string) {
+            onLoop([this, topic, send] { { std::lock_guard<std::recursive_mutex> lk(m_mtx); m_netJoined.insert(topic); } send(); });
+        });
+    }
+}
+
+// The notes Store holds for a topic, from every store node we ask (worker threads only: waits).
+std::vector<std::string> BackpackCoreImpl::storeNotes(const std::string& topic) {
+    for (int i = 0; i < 60; i++) {   // the node must be up to query Store
+        { std::lock_guard<std::recursive_mutex> lk(m_mtx); if (m_netStatus == "Connected") break; if (!m_netStarted) onLoop([this] { netStart(); }); }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    { std::lock_guard<std::recursive_mutex> lk(m_mtx); if (m_netStatus != "Connected") throw bp::Err("the Delivery node isn't up (" + m_netStatus + ")"); }
+    struct St { std::mutex m; std::condition_variable cv; int left = 0, ok = 0; std::vector<std::string> notes; std::string err; };
+    auto st = std::make_shared<St>();
+    // ask every fleet node: some don't answer (2026-10-28: the node-01s refused the dial), any one is enough
+    st->left = (int)(sizeof(kEntry) / sizeof(kEntry[0]));
+    static std::atomic<int> counter{0};
+    for (auto peer : kEntry) {
+        json req{{"requestId", "backpack-" + std::to_string(++counter)}, {"includeData", true}, {"paginationForward", false}, {"paginationLimit", 20},
+                 {"pubsubTopic", pubsubTopicFor(topic)}, {"contentTopics", json::array({topic})},
+                 {"timeStart", (long long)(nowSec() - 86400 + 120) * 1000000000LL}};   // store nodes refuse a range over 24 h
+        std::string reqS = req.dump(), peerS = peer;
+        onLoop([this, st, reqS, peerS] {
+            modules().delivery_module.storeQueryAsync(reqS, peerS, 15000, [st](StdLogosResult r) {
+                std::vector<std::string> got; std::string err;
+                try {
+                    if (!r.success) throw bp::Err(r.error.empty() ? "no answer" : r.error);
+                    // the response JSON, as text or already parsed
+                    json resp = r.value.is_string() ? json::parse(r.value.get<std::string>()) : json::parse(r.value.dump());
+                    for (auto& m : resp.value("messages", json::array())) {
+                        if (!m.is_object() || !m.contains("message") || !m["message"].is_object()) continue;
+                        auto p = m["message"].value("payload", std::string());
+                        bp::Bytes b = bp::unb64url(p); noteCandidates(std::string(b.begin(), b.end()), got);
+                    }
+                } catch (std::exception& e) { err = e.what(); }
+                std::lock_guard<std::mutex> l(st->m);
+                for (auto& g : got) st->notes.push_back(g);
+                if (!err.empty()) st->err = err; else st->ok++;
+                if (--st->left == 0) st->cv.notify_all();
+            });
+        });
+    }
+    std::unique_lock<std::mutex> l(st->m);
+    st->cv.wait_for(l, std::chrono::seconds(25), [&] { return st->left == 0; });
+    if (st->notes.empty() && !st->err.empty() && st->ok == 0) throw bp::Err("Store: " + st->err);
+    return st->notes;
 }
 
 // app preferences beside the repos: the last Storage node used (a suggestion, never a default in code)
@@ -130,7 +301,8 @@ std::string BackpackCoreImpl::snapshot() {
         for (auto& e : bp::fs::directory_iterator(m_dataDir, ec)) if (e.is_directory() && bp::fs::exists(e.path() / "repo.json") && bp::fs::exists(e.path() / "key.pem")) slugs.push_back(e.path().filename().string());
         std::sort(slugs.begin(), slugs.end());
         for (auto& s : slugs) {
-            try { json r = bp::Repo::load(repoDir(s)).summary(); r["busy"] = m_busyRepo.count(s) > 0; r.erase("apps"); r["appCount"] = bp::Repo::load(repoDir(s)).s["apps"].size(); repos.push_back(r); }
+            try { json r = bp::Repo::load(repoDir(s)).summary(); r["busy"] = m_busyRepo.count(s) > 0;
+                  auto sent = m_netSent.find(noteTopic(r.value("pointerId", std::string()))); r["noteSent"] = sent == m_netSent.end() ? json() : json(sent->second); r.erase("apps"); r["appCount"] = bp::Repo::load(repoDir(s)).s["apps"].size(); repos.push_back(r); }
             catch (std::exception& e) { repos.push_back(json{{"slug", s}, {"error", e.what()}}); }
         }
     }
@@ -146,7 +318,7 @@ std::string BackpackCoreImpl::snapshot() {
         bp::Subs x = bp::Subs::load(m_dataDir); me = x.s["me"];
         for (auto& [k, v] : x.s["subs"].items()) { json o = v; o["busy"] = m_busyRepo.count(subSlug(k)) > 0; subs.push_back(o); }
     } catch (...) {}
-    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}, {"subs", subs}, {"me", me}});
+    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}, {"subs", subs}, {"me", me}, {"delivery", m_netStatus}});
 }
 
 std::string BackpackCoreImpl::createRepo(std::string slug, std::string name, std::string privateFlag, std::string node) {
@@ -336,7 +508,7 @@ std::string BackpackCoreImpl::publish(std::string slug, std::string force) {
         BP_JOB_REPO(dir)
         json res = r.publish(force == "1");
         if (res.value("unchanged", false)) r.log("Nothing changed since #" + std::to_string(res.value("seq", 0)) + ": not published");
-        else r.log("Published #" + std::to_string(res.value("seq", 0)));
+        else { r.log("Published #" + std::to_string(res.value("seq", 0)) + "; the update note goes out over Delivery"); announce(r.dir.filename().string()); }
         return res.dump();
     });
 }
@@ -384,7 +556,8 @@ std::string BackpackCoreImpl::subSlug(const std::string& key) const { return "su
 
 #define BP_JOB_SUBS                                                                                  \
     bp::Subs x = bp::Subs::load(dataDir);                                                            \
-    x.log = [this, &j](const std::string& m) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.log.push_back(m); };
+    x.log = [this, &j](const std::string& m) { std::lock_guard<std::recursive_mutex> l(m_mtx); j.log.push_back(m); }; \
+    x.fromDelivery = [this](const std::string& key) { return storeNotes(noteTopic(key)); };
 
 std::string BackpackCoreImpl::follow(std::string link) {
     std::string key;

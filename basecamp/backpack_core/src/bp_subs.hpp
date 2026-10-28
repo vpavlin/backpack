@@ -45,6 +45,8 @@ struct Subs {
     std::string file;
     json s;
     std::function<void(const std::string&)> log = [](const std::string&) {};
+    // update notes for a repo key from Logos Delivery (Store), as received; set by the module
+    std::function<std::vector<std::string>(const std::string&)> fromDelivery;
     static Subs load(const std::string& dataDir) {
         Subs x; x.file = dataDir + "/subscriptions.json";
         try { x.s = json::parse(readFile(x.file)); } catch (...) { x.s = json::object(); }
@@ -78,16 +80,26 @@ struct Subs {
     json refresh(const std::string& key) {
         json& x = sub(key);
         json best; int64_t bestSeq = -1; std::string lastErr;
+        auto consider = [&](const std::string& text) {
+            json b = open(json::parse(text), key, "pointer");
+            if (b.value("seq", 0) > bestSeq) { bestSeq = b.value("seq", 0); best = b; }
+        };
+        // Delivery first (ADR 0007): the publisher sends every note there; web addresses are optional
+        if (fromDelivery) {
+            std::vector<std::string> notes;
+            try { notes = fromDelivery(key); } catch (std::exception& e) { lastErr = std::string("Delivery: ") + e.what(); }
+            for (auto& n : notes) { try { consider(n); } catch (...) {} }   // the topic is public: skip what doesn't open
+            if (notes.empty() && lastErr.empty()) lastErr = "nothing on Delivery yet";
+        }
         for (auto& u : x.value("pointers", json::array())) {
             try {
                 auto r = Http::get(u.get<std::string>(), 8192, 30000);
                 if (!r.ok()) throw Err(r.error.empty() ? "HTTP " + std::to_string(r.status) : r.error);
-                json b = open(json::parse(r.body), key, "pointer");
-                if (b.value("seq", 0) > bestSeq) { bestSeq = b.value("seq", 0); best = b; }
+                consider(r.body);
             } catch (std::exception& e) { lastErr = e.what(); }
         }
         if (bestSeq < 0) {
-            x["error"] = x.value("pointers", json::array()).empty() ? "the link names no web address for the repo's update note" : "couldn't read the update note: " + lastErr;
+            x["error"] = "couldn't find the repo's update note (" + lastErr + "): the publisher may not have published yet, or their Basecamp has been off for a long time";
             save(); throw Err(x["error"].get<std::string>());
         }
         x.erase("error"); x["seq"] = bestSeq; x["checkedAt"] = nowIso();

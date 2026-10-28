@@ -105,10 +105,22 @@ Item {
     Component.onCompleted: root.refresh()
 
     // ── helpers
-    // A members repo hands out its key only through the update note: with no web address phones read, or
-    // nowhere publish sends it, no phone can ever get in (the link carries no key)
-    function noteMissing() { return !!(root.cur && root.cur.members && (!root.cur.pointersGet.length || !root.cur.pointersPut.length)) }
-    readonly property string noteMissingText: "No phone can read this repo yet: phones get their key from the update note, and " + (root.cur && !root.cur.pointersGet.length ? "it has no web address (Settings)." : "publish sends it nowhere (backpack config --pointer-put).")
+    // A members repo hands out its key only through the update note (the link carries no key). The update note goes out over Delivery (loam_core); web addresses are an optional extra
+    readonly property var curListed: { var l = root.st.repos || []; for (var i = 0; i < l.length; i++) if (l[i].slug === root.sel) return l[i]; return null }
+    function noteLine() {
+        if (!root.cur) return ""
+        var d = root.st.delivery || "off", sent = root.curListed ? root.curListed.noteSent : null
+        var t = "Update note: over Delivery"
+        if (sent && String(sent).indexOf("failed") === 0) t += " (" + sent + ")"
+        else if (sent) t += " (sent " + root.when(Date.parse(sent)) + ")"
+        else if (d === "Connected") t += (root.cur.seq ? " (sent at the next publish)" : "")
+        else if (d.indexOf("error") === 0) t += " (" + d + ")"
+        else if (root.cur.seq) t += " (the node is " + d + ")"
+        if (root.cur.pointersGet.length) t += " · also on the web: " + root.cur.pointersGet.join(", ")
+        if (root.cur.pointersPut.length) t += " · sent via " + root.cur.pointersPut.join(", ")
+        return t
+    }
+    function noteBad() { var d = root.st.delivery || ""; return d.indexOf("error") === 0 && !(root.cur && root.cur.pointersPut.length) }
     // devices that can read a members repo: added by hand + those of paid-up memberships
     function deviceCount(r) {
         if (!r) return 0
@@ -302,8 +314,7 @@ Item {
                         Sub { text: root.cur ? ("#" + root.cur.seq + " · publisher key " + root.keyShort(root.cur.key) + " · Storage node " + (root.cur.node || "not set")) : ""; Layout.fillWidth: true }
                         Sub { visible: !!(root.cur && root.cur.nodeWarning); color: root.cWarn; Layout.fillWidth: true
                               text: root.cur ? (root.cur.node ? "The Storage node is " + root.cur.nodeWarning + ": phones outside that network can't fetch this repo." : "Set a Storage node in Settings before publishing.") : "" }
-                        Sub { visible: root.noteMissing(); color: root.cBad; Layout.fillWidth: true; text: root.noteMissingText }
-                        Sub { text: root.cur ? ("Update note: " + (root.cur.pointersGet.length ? root.cur.pointersGet.join(", ") : "no web address") + (root.cur.pointersPut.length ? " · sent via " + root.cur.pointersPut.join(", ") : " · not sent anywhere")) : ""; Layout.fillWidth: true }
+                        Sub { text: root.noteLine(); color: root.noteBad() ? root.cBad : root.cSub; Layout.fillWidth: true }
                     }
                 }
                 Flow {
@@ -655,7 +666,6 @@ Item {
             width: parent.width; spacing: 10
             T { text: "Members"; font.bold: true; font.pixelSize: 17 }
             Sub { Layout.fillWidth: true; text: "Each device here gets the read key, wrapped for it alone, at the next publish. The key changes every hour and whenever you remove a device, so a removed device can't read new versions (what it already has stays its own)." }
-            Sub { visible: root.noteMissing(); color: root.cBad; Layout.fillWidth: true; text: root.noteMissingText }
             ListView {
                 Layout.fillWidth: true; Layout.preferredHeight: Math.min(contentHeight, 280); clip: true; spacing: 6
                 model: root.cur && root.cur.memberDevices ? root.cur.memberDevices : []
@@ -758,9 +768,8 @@ Item {
                 LogosButton { Layout.preferredWidth: 120; text: "Test"; enabled: sNode.text.length > 8; onClicked: root.testNode(sNode.text.trim(), sNodeMsg) }
             }
             Sub { id: sNodeMsg; Layout.fillWidth: true; visible: text !== "" }
-            Sub { text: "Web addresses of the update note phones may read (https, one per line)" }
+            Sub { text: "The update note goes out over Logos Delivery at every publish, and again twice a day while Basecamp runs. Optionally, web addresses phones may also read it from (https, one per line):"; Layout.fillWidth: true }
             TextArea { id: sGet; Layout.fillWidth: true; Layout.preferredHeight: 70; color: root.cText; font.pixelSize: 13; background: Rectangle { radius: 6; color: root.cBg; border.color: root.cLine } }
-            Sub { text: "Where publish sends the note is set with the CLI for now (backpack config --pointer-put)."; Layout.fillWidth: true }
             RowLayout {
                 Item { Layout.fillWidth: true }
                 LogosButton { text: "Cancel"; onClicked: settingsDialog.close() }

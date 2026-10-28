@@ -71,3 +71,24 @@ the highest valid `seq` from all of them.
   topics, waits up to 8 s for every repo's note to come back through the receive callback, then decides.
   With the web switch off (the default since 0.2.5), no HTTP request is made at all.
 
+## Basecamp sends it itself (2026-10-28, backpack_core 0.4.0)
+
+- **Publish:** every publish sends `latest.json` (the signed note, verbatim) to `/backpack/1/<id>/json`
+  through loam_core's shared node, on plain relay (`setTopicMode("/backpack/", "relay")`), not SDS
+  channels. While Basecamp runs it sends every published note again: once ~8 s after start, then every
+  12 hours. No web host, ssh or CLI step is needed; `pointers.put` targets still run when set.
+- **Store window:** the logos.test store nodes refuse a query range over 24 h ("time range exceeds 24h"),
+  so a note is findable for about a day after it was last sent. The 12-hour resend keeps it there while
+  the publisher's Basecamp is open; the VPS timer (above) covers a publisher that is often off, if the
+  note is also rsynced there.
+- **Following in Basecamp:** a followed repo's note comes from Store through `delivery_module.storeQuery`
+  (pubsub topic by autosharding: cluster 2, 8 shards; `/backpack/` lands on shard 1), asked of all six
+  fleet nodes at once, then from any `u=` web addresses; the highest valid `seq` wins. On 2026-10-28 the
+  three node-01 peers refused the dial and node-02 (Hong Kong) answered: asking every node matters.
+- **Wire:** the payload as Store returns it is base64 of base64 of the JSON (loam_core's bearer layer);
+  the phone's `payloadCandidates` tries one and two decodings, and the desktop reader does the same.
+- **Verified (logosctl, two sessions, no web address, no pointer target):** publish of a members repo →
+  "Message successfully sent" on the fleet; publisher stopped; a second session followed the link and got
+  note #1 from Store; the restarted publisher re-sent it 8 s after loading. Not yet verified: a real phone
+  receiving it through Loam (the emulator can't run Loam).
+

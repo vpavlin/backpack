@@ -8,6 +8,8 @@
 // comments on declaration lines; ASCII only. Slow work (uploads) runs on worker threads as JOBS; the
 // view follows them in snapshot().
 #include <atomic>
+#include <deque>
+#include <set>
 #include <functional>
 #include <map>
 #include <memory>
@@ -16,6 +18,8 @@
 #include <thread>
 #include <vector>
 #include "logos_module_context.h"
+
+class QObject;
 
 class BackpackCoreImpl : public LogosModuleContext {
 public:
@@ -101,4 +105,22 @@ private:
     std::map<int, std::shared_ptr<Job>> m_jobs;
     std::map<std::string, int> m_busyRepo;
     int m_nextJob = 1;
+
+    // Logos Delivery (ADR 0007): each publish sends the repo's update note to /backpack/1/<id>/json
+    // through loam_core's shared node (plain relay, as phones expect), and every published note is sent
+    // again twice a day while the module runs, so Store keeps it. Followed repos' notes come back from
+    // Store through delivery_module. Calls to other modules run on the module's event loop (m_loop).
+    QObject* m_loop = nullptr;
+    void onLoop(std::function<void()> fn);
+    std::string m_netStatus = "off";
+    bool m_netStarted = false;
+    std::set<std::string> m_netJoined;
+    std::deque<std::pair<std::string, std::string>> m_netQueue;
+    std::map<std::string, std::string> m_netSent;
+    std::map<std::string, long long> m_netSentAt;
+    void netStart();
+    void netFlush();
+    void announce(const std::string& slug);
+    void announceDue();
+    std::vector<std::string> storeNotes(const std::string& topic);
 };

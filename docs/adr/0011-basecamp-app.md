@@ -59,8 +59,8 @@ One Basecamp app, **Backpack**, in two modules, with two roles in one window.
 - **Storage:** uploads go to a node phones can reach. A desktop behind NAT can't serve phones (see
   "Storage NAT → hub cache"), so `backpack_core` uploads through `storage_gateway` to the VPS node, as
   the CLI does today, and uses the host's own node only for verify and caching. The node is a setting.
-- **Pointer:** written to the web hosts the repo lists and sent over Delivery through loam_core (the same
-  message the VPS relay sends today); the VPS timer keeps re-announcing it.
+- **Pointer:** sent over Delivery through loam_core at every publish and every 12 hours while the module
+  runs (done in 0.4.0, see ADR 0007); written to web hosts only if the repo lists any.
 - **LEZ:** through laptop/SPEL's surface for the `backpack_access` program (register, renew, list members),
   either a Basecamp module or a library `backpack_core` links. Wallet and signing follow that program's
   LEZ client.
