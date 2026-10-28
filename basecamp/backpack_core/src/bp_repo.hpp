@@ -156,7 +156,7 @@ struct Repo {
         Repo r; r.dir = d; Key k = Key::generate(); writeFileAtomic(r.keyFile(), k.pem());
         r.s = ojson{{"name", name}, {"node", node}, {"seq", 0}, {"pointers", {{"get", json::array()}, {"put", json::array()}}}, {"apps", ojson::object()}};
         // a first epoch key at once, so APKs added before the first publish are uploaded encrypted
-        if (members) r.s["members"] = ojson{{"epochLenMs", 3600000}, {"devices", json::array()}, {"epochKey", newKey()}};
+        if (members) r.s["members"] = ojson{{"devices", json::array()}, {"epochKey", newKey()}};
         else if (priv) r.s["readKey"] = newKey();
         r.save(); return r;
     }
@@ -347,20 +347,22 @@ struct Repo {
         return pks;
     }
 
-    // A new epoch key and key bundle when the epoch moved on or the members changed.
-    void rotateMembersIfNeeded(const Key& k, Node& n) {
+    // The device list a members repo publishes to, and its fingerprint (a change in it is a reason to publish).
+    std::pair<std::vector<std::string>, std::string> memberSet() {
         if (usesLez()) { try { syncLez(); } catch (std::exception& e) { log(std::string("LEZ unreachable, using the last list: ") + e.what()); } }
-        auto& m = s["members"];
-        int64_t len =std::max<int64_t>(60000, m.value("epochLenMs", 3600000LL));
-        uint64_t epoch = (uint64_t)(nowMs() / len);
         std::vector<std::string> pks = memberPks();
-        std::string devHash; for (auto& p : pks) devHash += p; devHash = sha256hex(devHash);
-        if (m.contains("epochKey") && m.value("epoch", (uint64_t)0) == epoch && m.value("devHash", "") == devHash) return;
+        std::string devHash; for (auto& p : pks) devHash += p;
+        return {pks, sha256hex(devHash)};
+    }
+    // A new key at every publish (ADR 0013): only the devices that are members now get it, so whoever
+    // lapsed or was taken off keeps what they had and gets nothing new. The epoch is the publish's seq.
+    void rekeyMembers(const Key& k, Node& n, uint64_t epoch, const std::vector<std::string>& pks, const std::string& devHash) {
+        auto& m = s["members"];
         std::string ek = newKey(); std::string K = k.pub();
         ojson wrapped = ojson::object(); for (auto& p : pks) wrapped[p] = wrapKey(ek, p, K, epoch);
         std::string bundle = seal("keys", ojson{{"key", K}, {"epoch", epoch}, {"wrapped", wrapped}}, k);
         TempDir t; fs::path f = t.p / "backpack-keys.json"; std::ofstream(f, std::ios::binary) << bundle;
-        log("members: new key for epoch " + std::to_string(epoch) + ", " + std::to_string(pks.size()) + " device(s)");
+        log("members: a new key for #" + std::to_string(epoch) + ", " + std::to_string(pks.size()) + " device(s)");
         std::string cid = n.upload(f.string(), "backpack-keys.json", "application/json");
         ojson pub = ojson::array(); for (auto& p : pks) pub.push_back(p);
         m["epoch"] = epoch; m["epochKey"] = ek; m["devHash"] = devHash; m["keysCid"] = cid; m["publishedPks"] = pub; save();
@@ -380,7 +382,8 @@ struct Repo {
     // Publish: seq+1, signed (and, private, encrypted) index to Storage, the pointer to every target.
     json publish(bool force) {
         Node n{node()}; json ni = n.info();
-        if (isMembers()) rotateMembersIfNeeded(key(), n);
+        std::pair<std::vector<std::string>, std::string> members;
+        if (isMembers()) members = memberSet();
         if (!readKey().empty()) encryptLeftovers();
         if (std::string w = nodeWarning(node()); !w.empty())
             log("Note: the Storage node is " + w + ": phones outside that network can't fetch this repo's files");
@@ -389,11 +392,13 @@ struct Repo {
         std::sort(apps.begin(), apps.end(), [](const ojson& a, const ojson& b) { return a.value("label", "") < b.value("label", ""); });
         if (apps.size() > MAX_APPS) throw Err("more apps than a phone accepts");
         ojson sortedAddrs = ni["addrs"]; std::sort(sortedAddrs.begin(), sortedAddrs.end());
-        ojson hashIn{{"name", s["name"]}, {"readKey", readKey().empty() ? ojson(nullptr) : ojson(readKey())}, {"nodes", ojson::array({ojson{{"peerId", ni["peerId"]}, {"addrs", sortedAddrs}}})}, {"pointers", s["pointers"]["get"]}, {"apps", apps}};
+        // a members repo's key changes at every publish, so its devices stand in for it here
+        ojson hashIn{{"name", s["name"]}, {"readKey", isMembers() ? ojson("members:" + members.second) : readKey().empty() ? ojson(nullptr) : ojson(readKey())}, {"nodes", ojson::array({ojson{{"peerId", ni["peerId"]}, {"addrs", sortedAddrs}}})}, {"pointers", s["pointers"]["get"]}, {"apps", apps}};
         if (usesLez()) hashIn["access"] = lezAccess();   // new terms are news for people deciding to join
         std::string contentHash = sha256hex(hashIn.dump());
         if (!force && s.value("lastContentHash", "") == contentHash) return json{{"ok", true}, {"unchanged", true}, {"seq", s.value("seq", 0)}};
         int64_t seq = s.value("seq", 0) + 1; std::string created = nowIso(); Key k = key(); std::string K = k.pub();
+        if (isMembers()) rekeyMembers(k, n, (uint64_t)seq, members.first, members.second);
         ojson body{{"v", 2}, {"name", s["name"]}, {"key", K}, {"seq", seq}, {"created", created}, {"nodes", nodes}, {"pointers", s["pointers"]["get"]}, {"apps", apps}};
         std::string index = seal("index", body, k, readKey());
         if (index.size() > (1u << 20)) throw Err("the signed index is over 1 MB, more than a phone accepts");

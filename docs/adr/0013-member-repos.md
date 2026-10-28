@@ -76,3 +76,20 @@ Then the person paying, not the publisher, adds the phones:
 - **Privacy:** memberships are public on the chain (which account pays for which repo, how many devices).
   Private registration is left for later.
 
+## A new key at every publish (2026-10-28)
+
+The key no longer follows a clock (`epochLenMs`): every publish that ships something makes a new key,
+wraps it for the devices that are members at that moment, and names it by the publish's `seq` (the
+bundle's `epoch`). A publish with nothing new (same content, same devices) still does nothing.
+
+Why, from the discussion with vpavlin: whoever can decrypt can copy, so no scheme stops a member from
+passing on what they already have; a server or DRM wouldn't either. What re-keying does is make sharing
+a chore: a key passed on unlocks one release, so keeping a friend up to date means re-sharing at every
+release. It also makes leaving free: a member who lapses or is taken off simply isn't given the next key
+and keeps what they had, which they would anyway, so expiry needs no publish of its own.
+
+Considered for later: a deposit on LEZ that anyone presenting a phone's private key can claim (the
+recipient of a shared key can take the sharer's deposit), and RLN-style anonymous memberships, where a
+device proves "I'm a paid member" without saying which and over-use exposes its secret. Both are noted, not
+planned; the main gain of RLN would be privacy (today the chain shows which phone keys belong to which repo).
+
