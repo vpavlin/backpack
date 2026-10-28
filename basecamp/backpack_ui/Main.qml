@@ -494,7 +494,7 @@ Item {
             T { text: "Your LEZ account"; font.bold: true; font.pixelSize: 17 }
             Sub { Layout.fillWidth: true; text: "Memberships are paid from this account. Backpack signs with the wallet in this folder; it never shows or copies its keys. The wallet's own settings decide which sequencer it talks to." }
             Sub { text: "Wallet folder" }
-            DField { id: aWallet; placeholderText: "/home/you/.lee-wallet" }
+            DField { id: aWallet; placeholderText: "/home/you/.lez-wallet" }
             Sub { text: "Account id (as the wallet shows it)" }
             DField { id: aAcct; placeholderText: "base58, as the LEZ Wallet app shows it" }
             Sub { Layout.fillWidth: true; color: root.cWarn; text: "Memberships are public on the chain: anyone can see that this account pays for a repo and how many devices it has." }
@@ -665,7 +665,7 @@ Item {
         ColumnLayout {
             width: parent.width; spacing: 10
             T { text: "Members"; font.bold: true; font.pixelSize: 17 }
-            Sub { Layout.fillWidth: true; text: "Each device here gets the read key, wrapped for it alone, at the next publish. The key changes every hour and whenever you remove a device, so a removed device can't read new versions (what it already has stays its own)." }
+            Sub { Layout.fillWidth: true; text: "Each device here gets the read key, wrapped for it alone, at the next publish. The key changes at every publish and only the devices that are members then get it, so a removed or lapsed one can't read new versions (what it already has stays its own)." }
             ListView {
                 Layout.fillWidth: true; Layout.preferredHeight: Math.min(contentHeight, 280); clip: true; spacing: 6
                 model: root.cur && root.cur.memberDevices ? root.cur.memberDevices : []
@@ -713,7 +713,7 @@ Item {
                 }
                 Sub { Layout.fillWidth: true; text: "Saving creates this repo's membership terms on the chain (or changes them: a new price applies to later payments). People join from Backpack on Basecamp; their phones get in at the next publish, which happens by itself." }
                 Sub { text: "Your LEZ wallet folder (signs the terms; pays only the network fee)" }
-                DField { id: lzWallet; placeholderText: "/home/you/.lee-wallet" }
+                DField { id: lzWallet; placeholderText: "/home/you/.lez-wallet" }
                 Sub { text: "Your account in it: it receives the payments and alone can change the terms" }
                 DField { id: lzAdmin; placeholderText: "base58, as the LEZ Wallet app shows it" }
                 RowLayout {
