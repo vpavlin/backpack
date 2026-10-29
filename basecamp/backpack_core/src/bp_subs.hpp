@@ -14,6 +14,7 @@ namespace bp {
 inline bool knownLezProgram(const std::string& hex) {
     static const char* known[] = {
         "7a285f2140b3e5dc097421f779b8ff353ec69c38303ad8c133af1ae3631234af",   // backpack_access, one config per repo (test chain)
+        "01f0369ec40456b4be54ebb09ac8af8cee704af51fc28be08b7fbcae218ea567",   // backpack_access on LEZ v0.3 (laptop/SPEL local chain)
     };
     for (auto k : known) if (hex == k) return true;
     return false;

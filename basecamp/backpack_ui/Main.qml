@@ -130,7 +130,7 @@ Item {
     }
     function lezActive(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i].paidThroughMs > Date.now()) n++; return n }
     // the membership program this build knows (backpack_access, one config per repo; test chain)
-    readonly property string lezProgram: "7a285f2140b3e5dc097421f779b8ff353ec69c38303ad8c133af1ae3631234af"
+    readonly property string lezProgram: "01f0369ec40456b4be54ebb09ac8af8cee704af51fc28be08b7fbcae218ea567"
     // a billing period in words
     function period(ms) {
         if (!ms) return "period"
