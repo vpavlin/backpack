@@ -597,7 +597,7 @@ std::string BackpackCoreImpl::payMembership(std::string key, std::string periods
     return startJob("pay", subSlug(key), [this, dataDir, key, n, phoneLink, expectPrice](Job& j) {
         BP_JOB_SUBS
         json r = x.pay(key, n, phoneLink, expectPrice);
-        x.refresh(key);
+        x.afterChange(key);
         x.log("Done: the publisher's next update lets your devices in");
         return r.dump();
     });
@@ -607,7 +607,7 @@ std::string BackpackCoreImpl::addMyDevice(std::string key, std::string phoneLink
     return startJob("device", subSlug(key), [this, dataDir, key, phoneLink](Job& j) {
         BP_JOB_SUBS
         json r = x.addDevice(key, phoneLink);
-        x.refresh(key);
+        x.afterChange(key);
         return r.dump();
     });
 }
@@ -616,7 +616,7 @@ std::string BackpackCoreImpl::removeMyDevice(std::string key, std::string device
     return startJob("device", subSlug(key), [this, dataDir, key, devicePk](Job& j) {
         BP_JOB_SUBS
         json r = x.removeDevice(key, devicePk);
-        x.refresh(key);
+        x.afterChange(key);
         return r.dump();
     });
 }

@@ -101,6 +101,7 @@ struct Subs {
         }
         if (bestSeq < 0) {
             x["error"] = "couldn't find the repo's update note (" + lastErr + "): the publisher may not have published yet, or their Basecamp has been off for a long time";
+            if (paid(x)) readMembership(x);   // the membership is on the chain: show it even without a fresh note
             save(); throw Err(x["error"].get<std::string>());
         }
         x.erase("error"); x["seq"] = bestSeq; x["checkedAt"] = nowIso();
@@ -169,6 +170,13 @@ struct Subs {
         log("taking a device off your membership");
         json r = lezMemberOp(cfg, "removeDevice", json{{"account", s["me"]["account"]}, {"devicePk", pk}});
         save(); return r;
+    }
+    // After a change on the chain (pay, add/remove a device): look for the repo's newer note, but read the
+    // membership from the chain either way, so a note that can't be fetched right now doesn't hide (or fail)
+    // a change that went through.
+    void afterChange(const std::string& key) {
+        try { refresh(key); }   // reads the membership from the chain even when the note can't be fetched
+        catch (std::exception& e) { log(std::string("the repo's update note isn't reachable right now (") + e.what() + "); your membership is read from the chain"); }
     }
     // device names are local (the chain has keys only)
     void nameDevice(json& x, const MemberLink& m) { if (!x.contains("deviceNames") || !x["deviceNames"].is_object()) x["deviceNames"] = json::object(); x["deviceNames"][m.pk] = m.name.empty() ? "a phone" : m.name; }
