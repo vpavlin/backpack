@@ -131,6 +131,7 @@ Item {
     function lezActive(list) { var n = 0; for (var i = 0; i < list.length; i++) if (list[i].paidThroughMs > Date.now()) n++; return n }
     // the membership program this build knows (backpack_access, one config per repo; test chain)
     readonly property string lezProgram: "01f0369ec40456b4be54ebb09ac8af8cee704af51fc28be08b7fbcae218ea567"
+    readonly property string lezSequencer: "https://testnet.lez.logos.co/"
     // a billing period in words
     function period(ms) {
         if (!ms) return "period"
@@ -707,7 +708,7 @@ Item {
                 readonly property var periods: [{ t: "month (30 days)", ms: 2592000000 }, { t: "week", ms: 604800000 }, { t: "day", ms: 86400000 }, { t: "hour (testing)", ms: 3600000 }]
                 onVisibleChanged: if (visible) {
                     var z = root.cur && root.cur.lez ? root.cur.lez : null
-                    lzWallet.text = z ? z.wallet : ""; lzSeq.text = z ? z.sequencer : ""; lzProg.text = z && z.program ? z.program : root.lezProgram
+                    lzWallet.text = z ? z.wallet : ""; lzSeq.text = z && z.sequencer ? z.sequencer : root.lezSequencer; lzProg.text = z && z.program ? z.program : root.lezProgram
                     lzAdmin.text = z && z.admin ? z.admin : ""; lzPrice.text = z && z.price ? z.price : ""
                     var pi = 0; for (var k = 0; k < periods.length; k++) if (z && z.periodMs === periods[k].ms) pi = k; lzPeriod.currentIndex = pi
                 }
@@ -722,7 +723,7 @@ Item {
                     ColumnLayout { Sub { text: "Period" } ComboBox { id: lzPeriod; Layout.preferredWidth: 200; model: lezBox.periods.map(function (p) { return p.t }) } }
                 }
                 Sub { text: "Sequencer" }
-                DField { id: lzSeq; placeholderText: "http://sequencer.example:3040/" }
+                DField { id: lzSeq; placeholderText: root.lezSequencer }
                 Sub { text: "Membership program id (64 hex)" }
                 DField { id: lzProg }
                 RowLayout {
