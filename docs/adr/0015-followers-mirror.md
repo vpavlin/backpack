@@ -53,6 +53,16 @@ Basecamps running a Logos blockchain node are online most of the time.
 - Old publishers' pointers have no `mirror`: their followers hold the index (and key bundle) only,
   until the publisher publishes with this version.
 
+## Results (2026-10-30, crib, Basecamp 0.3.2 with storage_module 3.0.3)
+
+- A follower holds a repo's files within seconds of its update (index, key bundle, list, APK); Stop
+  hosting removes them, Host again refetches them.
+- Desktop to desktop through the DHT works: with every file deleted from the publisher's node, a second
+  Basecamp that followed the repo fetched all of them (incl. a 639 kB APK) from the first follower in
+  about a minute.
+- The phone (emulator, Backpack through Loam 0.0.63's Storage) did not get the index from the mirrors
+  in 10+ minutes. Not explained yet; to test on a real arm64 phone and debug Loam's fetch path.
+
 ## Open
 
 - Storage expires blocks after `block-ttl` (30 days by default). Whether a repeated `fetch` of a held
