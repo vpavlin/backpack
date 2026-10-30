@@ -393,7 +393,8 @@ async function publish() {
   // nothing changed since the last publish → no new seq (phones would just re-download the same list).
   // The SPR is left out: the node re-signs it with a new sequence number now and then.
   const contentHash = sha256hex(Buffer.from(JSON.stringify({ name: s.name, readKey: s.readKey ?? null, nodes: nodesNow.map((n) => ({ peerId: n.peerId, addrs: [...n.addrs].sort() })), pointers: s.pointers.get, apps })));
-  if (contentHash === s.lastContentHash && !flag("force")) {
+  // an update published before mirror lists (ADR 0015) is out of date even when nothing else changed
+  if (contentHash === s.lastContentHash && s.lastMirror && !flag("force")) {
     console.log(`nothing changed since seq ${s.seq}; not publishing (--force to publish anyway)`);
     return;
   }
@@ -407,11 +408,22 @@ async function publish() {
   const indexFile = path.join(t, "backpack-index.json");
   fs.writeFileSync(indexFile, JSON.stringify(index));
   const cid = await upload(s.node, indexFile, "backpack-index.json", "application/json");
+  // ADR 0015: the files a follower should hold for others, as a public list the pointer names
+  // (CIDs only: a follower may not be able to read the index, and private files stay encrypted)
+  const cids = new Set([cid]);
+  for (const a of apps) {
+    if (typeof a.icon === "string") cids.add(a.icon);
+    for (const v of a.versions ?? []) if (typeof v.cid === "string") cids.add(v.cid);
+  }
+  const mirrorFile = path.join(t, "backpack-mirror.json");
+  fs.writeFileSync(mirrorFile, JSON.stringify({ v: 1, key: pubOf(), seq, cids: [...cids].sort() }));
+  const mirror = await upload(s.node, mirrorFile, "backpack-mirror.json", "application/json");
+  console.log(`mirror list: ${cids.size} files`);
   // pointer (ADR 0003): signed like the index, may live anywhere
-  const pointer = envelope("pointer", { key: pubOf(), seq, index: cid, created, nodes }, s.readKey);
+  const pointer = envelope("pointer", { key: pubOf(), seq, index: cid, created, nodes, mirror }, s.readKey);
   const pointerFile = path.join(dir, "latest.json");
   fs.writeFileSync(pointerFile, JSON.stringify(pointer));
-  s.seq = seq; s.lastIndex = cid; s.lastContentHash = contentHash;
+  s.seq = seq; s.lastIndex = cid; s.lastContentHash = contentHash; s.lastMirror = mirror;
   for (const target of s.pointers.put) {
     try {
       if (target.startsWith("rsync:")) execFileSync("rsync", ["-q", "--chmod=F644", pointerFile, target.slice(6)], { stdio: "inherit" });
