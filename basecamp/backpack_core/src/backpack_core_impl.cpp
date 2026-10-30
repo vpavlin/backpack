@@ -739,6 +739,7 @@ void BackpackCoreImpl::mirrorTickBody() {
         if (m_mirrorListing.count(L) && now - m_mirrorListing[L] < 10 * 60000) continue;
         std::error_code ec; bp::fs::create_directories(dir + "/mirror-tmp", ec);
         m_mirrorListing[L] = now;
+        if (!st["held"].contains(L)) st["held"][L]["pending"] = true;   // we download it: ours, so a cleanup removes it
         try { modules().storage_module.downloadToUrlAsyncResult(L, dir + "/mirror-tmp/" + L + ".json", false, 65536, false, true, [](logos::AsyncResult<StdLogosResult>) {}, 60000); }
         catch (...) { m_mirrorListing.erase(L); }
     }
