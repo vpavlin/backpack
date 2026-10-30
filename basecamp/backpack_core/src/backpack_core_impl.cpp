@@ -4,9 +4,10 @@
 #include "bp_keys.hpp"
 #include "bp_subs.hpp"
 #include "qrcodegen.hpp"
-#include "logos_sdk.h"   // generated: modules().loam_core / modules().delivery_module
+#include "logos_sdk.h"   // generated: modules().loam_core / .delivery_module / .storage_module
 #include <QObject>
 #include <QTimer>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 
@@ -41,6 +42,13 @@ void BackpackCoreImpl::onContextReady() {
     startWatcher();
     // calls to other modules wait until the module has loaded (the runtime rejects them from here)
     QTimer::singleShot(8000, m_loop, [this] { announceDue(); });
+    // mirroring (ADR 0015): first look after 20 s, then every BACKPACK_MIRROR_SEC (default 120)
+    int mirrorEvery = 120;
+    if (const char* e = std::getenv("BACKPACK_MIRROR_SEC")) mirrorEvery = std::max(15, std::atoi(e));
+    QTimer::singleShot(20000, m_loop, [this] { mirrorTick(); });
+    auto* mt = new QTimer(m_loop);
+    QObject::connect(mt, &QTimer::timeout, m_loop, [this] { mirrorTick(); });
+    mt->start(mirrorEvery * 1000);
 }
 
 // Paid repos publish themselves when someone joins or a device is taken off (not when a membership only
@@ -318,7 +326,7 @@ std::string BackpackCoreImpl::snapshot() {
         bp::Subs x = bp::Subs::load(m_dataDir); me = x.s["me"];
         for (auto& [k, v] : x.s["subs"].items()) { json o = v; o["busy"] = m_busyRepo.count(subSlug(k)) > 0; subs.push_back(o); }
     } catch (...) {}
-    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}, {"subs", subs}, {"me", me}, {"delivery", m_netStatus}});
+    return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}, {"subs", subs}, {"me", me}, {"delivery", m_netStatus}, {"mirror", json::parse(m_mirrorStatus, nullptr, false)}});
 }
 
 std::string BackpackCoreImpl::createRepo(std::string slug, std::string name, std::string privateFlag, std::string node) {
@@ -619,4 +627,176 @@ std::string BackpackCoreImpl::removeMyDevice(std::string key, std::string device
         x.afterChange(key);
         return r.dump();
     });
+}
+
+// ── Mirroring (ADR 0015): followers hold the files of the repos they follow and serve them ─────────────
+namespace {
+long long mirrorNowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+bool resTrue(const StdLogosResult& r) {
+    return r.success && ((r.value.is_boolean() && r.value.get<bool>()) || (r.value.is_string() && r.value.get<std::string>() == "true"));
+}
+json resJson(const StdLogosResult& r) {
+    if (r.value.is_string()) { json j = json::parse(r.value.get<std::string>(), nullptr, false); return j.is_discarded() ? json() : j; }
+    return r.value;
+}
+bool isCid(const std::string& c) {
+    if (c.size() < 40 || c.size() > 120) return false;
+    for (char ch : c) if (!isalnum((unsigned char)ch)) return false;
+    return true;
+}
+}  // namespace
+
+std::string BackpackCoreImpl::setMirror(std::string key, std::string on) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    try {
+        bp::Subs x = bp::Subs::load(m_dataDir);
+        json& s = x.sub(key);
+        if (on == "0") s["mirrorOff"] = true; else s.erase("mirrorOff");
+        x.save();
+    } catch (std::exception& e) { return fail(e.what()); }
+    onLoop([this] { mirrorTick(); });
+    return ok();
+}
+
+// A mirror list arrived (downloadToUrl of the list CID): remember its CIDs. Other downloads are not ours.
+void BackpackCoreImpl::mirrorListDone(const std::string& payload) {
+    json p = json::parse(payload, nullptr, false);
+    if (!p.is_object()) return;
+    std::string cid = p.value("sessionId", std::string());
+    if (!m_mirrorListing.count(cid)) return;   // someone else's download
+    m_mirrorListing.erase(cid);
+    std::string dir;
+    { std::lock_guard<std::recursive_mutex> lk(m_mtx); dir = m_dataDir; }
+    std::string tmp = dir + "/mirror-tmp/" + cid + ".json";
+    std::error_code ec;
+    if (p.value("success", false)) {
+        try {
+            std::string raw = bp::readFile(tmp);
+            if (raw.size() <= (1u << 20)) {
+                json l = json::parse(raw);
+                std::vector<std::string> cids;
+                for (auto& c : l.value("cids", json::array())) if (c.is_string() && isCid(c) && cids.size() < 5000) cids.push_back(c);
+                m_mirrorNewLists[cid] = cids;   // merged into the state by the next tick
+            }
+        } catch (std::exception& e) { fprintf(stderr, "Backpack mirror: list %s unreadable: %s\n", cid.c_str(), e.what()); }
+    } else fprintf(stderr, "Backpack mirror: list %s failed: %s\n", cid.c_str(), p.value("error", std::string()).c_str());
+    bp::fs::remove(tmp, ec);
+    onLoop([this] { mirrorTick(); });
+}
+
+// Hold what the followed repos' latest pointers name; drop what nothing names any more. fetch() has no
+// completion event, so holding is observed with exists(). Runs on the module's event loop.
+void BackpackCoreImpl::mirrorTick() {
+    // never inside another tick: its sync calls to storage_module run nested events, which may start one
+    if (m_mirrorInTick) { m_mirrorAgain = true; return; }
+    m_mirrorInTick = true;
+    try { mirrorTickBody(); }
+    catch (std::exception& e) { fprintf(stderr, "Backpack mirror: tick failed: %s\n", e.what()); }
+    catch (...) { fprintf(stderr, "Backpack mirror: tick failed\n"); }
+    m_mirrorInTick = false;
+    if (m_mirrorAgain) { m_mirrorAgain = false; onLoop([this] { mirrorTick(); }); }
+}
+
+void BackpackCoreImpl::mirrorTickBody() {
+    std::string dir; json subs;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        dir = m_dataDir;
+        try { subs = bp::Subs::load(dir).s["subs"]; } catch (...) { return; }
+    }
+    if (!m_mirrorEvents) {
+        try { modules().storage_module.onStorageDownloadDone([this](const std::string& payload) { onLoop([this, payload] { mirrorListDone(payload); }); }); m_mirrorEvents = true; }
+        catch (...) { return; }   // storage not up yet: next tick
+    }
+    json st; try { st = json::parse(bp::readFile(dir + "/mirror.json")); } catch (...) { st = json::object(); }
+    if (!st.is_object()) st = json::object();
+    if (!st.contains("held") || !st["held"].is_object()) st["held"] = json::object();
+    if (!st.contains("lists") || !st["lists"].is_object()) st["lists"] = json::object();
+    for (auto& [L, cids] : m_mirrorNewLists) st["lists"][L] = cids;
+    m_mirrorNewLists.clear();
+    long long now = mirrorNowMs();
+
+    // what each followed repo asks us to hold
+    std::map<std::string, std::set<std::string>> want;   // cid -> repo keys
+    std::set<std::string> listsInUse;
+    json perRepo = json::object();
+    for (auto& [key, x] : subs.items()) {
+        if (x.value("mirrorOff", false) || !x.contains("hold")) continue;
+        const json& h = x["hold"];
+        // dial the repo's own nodes first (every 10 minutes): fetching across nodes needs a direct connection
+        for (auto& n : h.value("nodes", json::array())) {
+            std::string pid = n.value("peerId", std::string());
+            if (pid.empty() || (m_mirrorDialed.count(pid) && now - m_mirrorDialed[pid] < 10 * 60000)) continue;
+            m_mirrorDialed[pid] = now;
+            std::vector<std::string> addrs; for (auto& a : n.value("addrs", json::array())) if (a.is_string()) addrs.push_back(a);
+            try { modules().storage_module.connectAsyncResult(pid, addrs, [](logos::AsyncResult<StdLogosResult>) {}, 60000); } catch (...) {}
+        }
+        for (const char* f : {"index", "keys", "mirror"}) if (h.contains(f) && h[f].is_string() && isCid(h[f])) want[h[f]].insert(key);
+        std::string L = h.value("mirror", std::string());
+        if (L.empty() || !isCid(L)) continue;
+        listsInUse.insert(L);
+        if (st["lists"].contains(L)) { for (auto& c : st["lists"][L]) want[c.get<std::string>()].insert(key); continue; }
+        if (m_mirrorListing.count(L) && now - m_mirrorListing[L] < 10 * 60000) continue;
+        std::error_code ec; bp::fs::create_directories(dir + "/mirror-tmp", ec);
+        m_mirrorListing[L] = now;
+        try { modules().storage_module.downloadToUrlAsyncResult(L, dir + "/mirror-tmp/" + L + ".json", false, 65536, false, true, [](logos::AsyncResult<StdLogosResult>) {}, 60000); }
+        catch (...) { m_mirrorListing.erase(L); }
+    }
+
+    // fetch what's missing (advertise=true: we announce and serve it), note what has arrived
+    for (auto& [cid, keys] : want) {
+        bool have = false;
+        try { have = resTrue(modules().storage_module.exists(cid)); } catch (...) {}
+        if (have) {
+            // already in the node before we wanted it (another app's data): hold it, never remove it
+            if (!st["held"].contains(cid)) st["held"][cid]["preexisting"] = true;
+            json& h = st["held"][cid];
+            h.erase("pending");
+            if (!h.contains("since")) h["since"] = bp::nowIso();
+            h["repos"] = json(std::vector<std::string>(keys.begin(), keys.end()));
+            m_mirrorFetching.erase(cid);
+            continue;
+        }
+        auto f = m_mirrorFetching.find(cid);
+        if (f != m_mirrorFetching.end() && now - f->second < 10 * 60000) continue;
+        m_mirrorFetching[cid] = now;
+        st["held"][cid]["pending"] = true;   // ours from now on, so a later cleanup may remove it
+        try { modules().storage_module.fetchAsyncResult(cid, false, true, [](logos::AsyncResult<StdLogosResult>) {}, 60000); } catch (...) {}
+    }
+
+    // drop what no followed repo names any more: only CIDs this mirror fetched
+    std::vector<std::string> drop;
+    for (auto& [cid, h] : st["held"].items()) if (!want.count(cid)) drop.push_back(cid);
+    for (auto& cid : drop) {
+        if (!st["held"][cid].value("preexisting", false)) { try { modules().storage_module.remove(cid); } catch (...) {} }
+        st["held"].erase(cid); m_mirrorFetching.erase(cid);
+    }
+    std::vector<std::string> oldLists;
+    for (auto& [L, v] : st["lists"].items()) if (!listsInUse.count(L)) oldLists.push_back(L);
+    for (auto& L : oldLists) st["lists"].erase(L);
+
+    // status for the view: per repo files held / named and bytes; the node's announced addresses
+    std::map<std::string, long long> sizes;
+    try {
+        json ms = resJson(modules().storage_module.manifests());
+        if (ms.is_array()) for (auto& m : ms) if (m.is_object()) sizes[m.value("cid", std::string())] = m.value("datasetSize", 0LL);
+    } catch (...) {}
+    for (auto& [cid, keys] : want) {
+        bool held = st["held"].contains(cid) && !st["held"][cid].value("pending", false);
+        for (auto& k : keys) {
+            json& r = perRepo[k];
+            if (!r.is_object()) r = json::object();
+            r["files"] = r.value("files", 0) + 1;
+            if (held) { r["held"] = r.value("held", 0) + 1; r["bytes"] = r.value("bytes", 0LL) + (sizes.count(cid) ? sizes[cid] : 0LL); }
+        }
+    }
+    json addrs = json::array();
+    try { json d = resJson(modules().storage_module.debug()); if (d.is_object() && d.contains("addrs")) addrs = d["addrs"]; } catch (...) {}
+    for (auto& [L, cids] : m_mirrorNewLists) st["lists"][L] = cids;   // arrived during this tick
+    m_mirrorNewLists.clear();
+    try { bp::writeFileAtomic(dir + "/mirror.json", st.dump(1), 0600); } catch (...) {}
+    fprintf(stderr, "Backpack mirror: %zu wanted, %zu held, %zu fetching, %zu lists, dropped %zu, %zu addrs\n",
+            want.size(), (size_t)st["held"].size(), m_mirrorFetching.size(), (size_t)st["lists"].size(), drop.size(), (size_t)addrs.size());
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    m_mirrorStatus = json{{"repos", perRepo}, {"addrs", addrs}, {"checkedAt", bp::nowIso()}}.dump();
 }

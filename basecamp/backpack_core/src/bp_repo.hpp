@@ -396,7 +396,8 @@ struct Repo {
         ojson hashIn{{"name", s["name"]}, {"readKey", isMembers() ? ojson("members:" + members.second) : readKey().empty() ? ojson(nullptr) : ojson(readKey())}, {"nodes", ojson::array({ojson{{"peerId", ni["peerId"]}, {"addrs", sortedAddrs}}})}, {"pointers", s["pointers"]["get"]}, {"apps", apps}};
         if (usesLez()) hashIn["access"] = lezAccess();   // new terms are news for people deciding to join
         std::string contentHash = sha256hex(hashIn.dump());
-        if (!force && s.value("lastContentHash", "") == contentHash) return json{{"ok", true}, {"unchanged", true}, {"seq", s.value("seq", 0)}};
+        // an update published before mirror lists (ADR 0015) is out of date even when nothing else changed
+        if (!force && s.value("lastContentHash", "") == contentHash && s.contains("lastMirror")) return json{{"ok", true}, {"unchanged", true}, {"seq", s.value("seq", 0)}};
         int64_t seq = s.value("seq", 0) + 1; std::string created = nowIso(); Key k = key(); std::string K = k.pub();
         if (isMembers()) rekeyMembers(k, n, (uint64_t)seq, members.first, members.second);
         ojson body{{"v", 2}, {"name", s["name"]}, {"key", K}, {"seq", seq}, {"created", created}, {"nodes", nodes}, {"pointers", s["pointers"]["get"]}, {"apps", apps}};
@@ -408,11 +409,26 @@ struct Repo {
         ojson pbody{{"key", K}, {"seq", seq}, {"index", cid}, {"created", created}, {"nodes", nodes}};
         // a member repo's pointer is public and names the key bundle (ADR 0013)
         if (isMembers()) { pbody["keys"] = s["members"]["keysCid"]; pbody["epoch"] = s["members"]["epoch"]; }
+        // ADR 0015: the files a follower should hold for others, as a public list the pointer names
+        // (CIDs only: a follower may not be able to read the index, and private files stay encrypted)
+        {
+            std::vector<std::string> cids{cid};
+            if (isMembers() && s["members"].contains("keysCid")) cids.push_back(s["members"]["keysCid"]);
+            for (auto& a : apps) {
+                if (a.contains("icon") && a["icon"].is_string()) cids.push_back(a["icon"]);
+                for (auto& v : a["versions"]) if (v.contains("cid") && v["cid"].is_string()) cids.push_back(v["cid"]);
+            }
+            std::sort(cids.begin(), cids.end()); cids.erase(std::unique(cids.begin(), cids.end()), cids.end());
+            fs::path mf = t.p / "backpack-mirror.json";
+            std::ofstream(mf, std::ios::binary) << ojson{{"v", 1}, {"key", K}, {"seq", seq}, {"cids", cids}}.dump();
+            log("uploading the mirror list (" + std::to_string(cids.size()) + " files)...");
+            pbody["mirror"] = n.upload(mf.string(), "backpack-mirror.json", "application/json");
+        }
         // a paid repo says where and for how much one joins (public: the membership is on a public chain anyway)
         if (usesLez()) pbody["access"] = lezAccess();
         std::string pointer = seal("pointer", pbody, k, isMembers() ? std::string() : readKey());
         fs::path pf = dir / "latest.json"; writeFileAtomic(pf, pointer, 0644);
-        s["seq"] = seq; s["lastIndex"] = cid; s["lastContentHash"] = contentHash;
+        s["seq"] = seq; s["lastIndex"] = cid; s["lastContentHash"] = contentHash; s["lastMirror"] = pbody["mirror"];
         json pushed = json::array();
         for (auto& tgt : s["pointers"]["put"]) {
             std::string target = tgt; std::string out; int rc = 0;

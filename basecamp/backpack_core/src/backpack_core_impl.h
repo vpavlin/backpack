@@ -80,6 +80,9 @@ public:
     std::string payMembership(std::string key, std::string periods, std::string phoneLink, std::string expectPrice);
     std::string addMyDevice(std::string key, std::string phoneLink);
     std::string removeMyDevice(std::string key, std::string devicePk);
+    // Mirroring (ADR 0015): hold a followed repo's files in this Basecamp's Storage node and serve them
+    // to others. On by default; on = "1" or "0". Status shows in snapshot().mirror.
+    std::string setMirror(std::string key, std::string on);
 
 protected:
     void onContextReady() override;
@@ -123,4 +126,19 @@ private:
     void announce(const std::string& slug);
     void announceDue();
     std::vector<std::string> storeNotes(const std::string& topic);
+
+    // Mirroring (ADR 0015), on the module's event loop: every BACKPACK_MIRROR_SEC (default 120) hold
+    // what the followed repos' latest pointers name, drop what they no longer name. State in
+    // <data dir>/mirror.json (only CIDs fetched here are ever removed); status for the view.
+    bool m_mirrorEvents = false;
+    std::map<std::string, long long> m_mirrorFetching;
+    std::map<std::string, long long> m_mirrorListing;
+    std::map<std::string, long long> m_mirrorDialed;
+    // lists that arrived (possibly during a tick: sync calls to other modules run nested events)
+    std::map<std::string, std::vector<std::string>> m_mirrorNewLists;
+    bool m_mirrorInTick = false, m_mirrorAgain = false;
+    std::string m_mirrorStatus = "{}";
+    void mirrorTick();
+    void mirrorTickBody();
+    void mirrorListDone(const std::string& payload);
 };

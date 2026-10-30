@@ -105,6 +105,17 @@ struct Subs {
             save(); throw Err(x["error"].get<std::string>());
         }
         x.erase("error"); x["seq"] = bestSeq; x["checkedAt"] = nowIso();
+        // what to hold for others (ADR 0015): the signed pointer names the index, the key bundle and the mirror list
+        json hold = json::object();
+        for (const char* f : {"index", "keys", "mirror"}) if (best.contains(f) && best[f].is_string() && !best[f].get<std::string>().empty()) hold[f] = best[f];
+        // the repo's own Storage nodes: a mirror dials them before fetching, as phones do
+        json nodes = json::array();
+        for (auto& n : best.value("nodes", json::array())) if (n.is_object() && n.contains("peerId") && n["peerId"].is_string() && nodes.size() < 8) {
+            json addrs = json::array(); for (auto& a : n.value("addrs", json::array())) if (a.is_string() && addrs.size() < 4) addrs.push_back(a);
+            nodes.push_back(json{{"peerId", n["peerId"]}, {"addrs", addrs}});
+        }
+        hold["nodes"] = nodes;
+        x["hold"] = hold;
         if (best.contains("access") && best["access"].is_object()) x["access"] = best["access"]; else x.erase("access");
         if (paid(x)) readMembership(x);
         save();

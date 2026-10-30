@@ -402,9 +402,22 @@ Item {
                 }
                 Sub { Layout.fillWidth: true; text: subPage.sx ? ("publisher key " + root.keyShort(subPage.sx.key) + (subPage.sx.seq !== undefined ? " · update #" + subPage.sx.seq : "") + (subPage.sx.checkedAt ? " · checked " + subPage.sx.checkedAt.slice(0, 16).replace("T", " ") : "")) : "" }
                 Sub { visible: !!(subPage.sx && subPage.sx.error); color: root.cBad; Layout.fillWidth: true; text: subPage.sx && subPage.sx.error ? subPage.sx.error : "" }
+                // ADR 0015: this Basecamp holds the repo's files and serves them to others
+                Sub {
+                    Layout.fillWidth: true
+                    property var m: root.st.mirror && root.st.mirror.repos && subPage.sx ? root.st.mirror.repos[subPage.sx.key] : null
+                    property bool reachable: !!(root.st.mirror && root.st.mirror.addrs && root.st.mirror.addrs.length)
+                    color: subPage.sx && subPage.sx.mirrorOff ? root.cSub : (reachable ? root.cOk : root.cWarn)
+                    text: !subPage.sx ? "" : subPage.sx.mirrorOff ? "Not hosting this repo's files for others."
+                        : !m ? "Hosting for others: waiting for the repo's file list…"
+                        : "Hosting for others: " + (m.held || 0) + " of " + m.files + " files" + (m.bytes ? ", " + root.mb(m.bytes) : "")
+                          + (reachable ? " · your Storage node is reachable at " + root.st.mirror.addrs.length + " address(es)" : " · your Storage node announces no address, so others can't fetch from it")
+                }
                 Flow {
                     Layout.fillWidth: true; spacing: 8
                     LogosButton { text: "Check now"; enabled: !!subPage.sx && !subPage.sx.busy; onClicked: root.act("refreshSub", [root.selSub], "Checking…") }
+                    LogosButton { text: subPage.sx && subPage.sx.mirrorOff ? "Host for others" : "Stop hosting"; enabled: !!subPage.sx
+                        onClicked: root.act("setMirror", [root.selSub, subPage.sx.mirrorOff ? "1" : "0"], subPage.sx.mirrorOff ? "Hosting this repo's files" : "Stopped hosting: its files are removed") }
                     LogosButton { text: "Copy link"; enabled: !!subPage.sx; onClicked: root.copyText(subPage.sx.link) }
                     LogosButton { text: "Unfollow"; enabled: !!subPage.sx && !subPage.sx.busy
                         onClicked: confirmDialog.ask("Stop following " + subPage.sx.name + "? A membership you paid for stays yours on the chain; follow the link again to manage it.", function () { root.act("unfollow", [root.selSub], "Unfollowed", function () { root.selSub = "" }) }) }

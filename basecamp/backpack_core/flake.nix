@@ -9,6 +9,9 @@
     loam_core.url = "github:vpavlin/loam-basecamp/9edb5726122fee745712c758c1096713314552a5?dir=core";
     delivery_module.url = "github:logos-co/logos-delivery-module/v0.3.0";
     loam_core.inputs.delivery_module.follows = "delivery_module";
+    # Followers mirror the repos they follow in Basecamp's own Storage node (ADR 0015). The API of the
+    # bundled 3.0.2; our 3.0.3 (3.0.2 + libstorage PR #1540) installs over it from our repos.
+    storage_module.url = "github:logos-co/logos-storage-module/v3.0.2";
   };
 
   outputs = inputs@{ logos-module-builder, ... }:

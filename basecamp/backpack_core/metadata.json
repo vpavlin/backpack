@@ -10,7 +10,8 @@
   "main": "backpack_core_plugin",
   "dependencies": [
     "loam_core",
-    "delivery_module"
+    "delivery_module",
+    "storage_module"
   ],
   "nix": {
     "packages": {
