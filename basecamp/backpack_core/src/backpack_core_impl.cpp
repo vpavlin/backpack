@@ -13,7 +13,7 @@
 
 using bp::json;
 namespace {
-const char* VERSION = "0.5.1";
+const char* VERSION = "0.6.0";
 std::string ok(json j = json::object()) { j["ok"] = true; return j.dump(); }
 std::string fail(const std::string& why) { return json{{"ok", false}, {"error", why}}.dump(); }
 json qrMatrix(const std::string& text) {
