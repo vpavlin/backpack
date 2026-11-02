@@ -35,6 +35,7 @@ const joined = new Set<string>();                   // topics joined on the node
 
 let state: "off" | "starting" | "on" | "unavailable" = "off";
 let lastError = "";
+let lastPull = "";                                   // what Loam said to the last store pull (shown in the app)
 const keys = new Set<string>();
 const best = new Map<string, Pointer>();            // repo key → newest valid pointer seen over Delivery
 const via = new Map<string, "live" | "store" | "saved">();    // how that pointer arrived
@@ -46,7 +47,7 @@ let onPointer: ((p: Pointer) => void) | null = null;
 /** Newest pointer for `key` received over Delivery (live or from Store), if any. */
 export function pointerFor(key: string): Pointer | undefined { return best.get(key); }
 export function arrivedVia(key: string): "live" | "store" | "saved" | undefined { return via.get(key); }
-export function status(): { state: typeof state; error: string } { return { state, error: lastError }; }
+export function status(): { state: typeof state; error: string; pull: string } { return { state, error: lastError, pull: lastPull }; }
 
 const SAVED = "backpack.deliveryPointers.v1";      // repo key → the newest note's envelope text
 let saved: Record<string, string> = {};
@@ -102,7 +103,20 @@ function receiveFor(key: string, candidates: Uint8Array[]): boolean {
 /** Stop caring about removed repos (audit BP-21). The transport has no unsubscribe yet, so the topic
  *  stays joined until restart, but its messages are ignored and nothing is remembered for it. */
 export function unwatch(repoKeys: string[]): void {
+  const before = new Set([...keys].flatMap(topicsOf));
   for (const k of repoKeys) { readKeys.delete(k); keys.delete(k); best.delete(k); via.delete(k); heard.delete(k); lastTrigger.delete(k); save(k, null); }
+  // Loam >= 0.0.66 stops receiving + caching topics no remaining repo uses (an older Loam ignores it).
+  const still = new Set([...keys].flatMap(topicsOf));
+  const gone = [...before].filter((t) => !still.has(t));
+  if (gone.length && state === "on") { gone.forEach((t) => joined.delete(t)); Promise.resolve(T.leave(gone)).catch(() => {}); }
+}
+
+// While Backpack is open, read Loam's state every 15 s: when Loam's node comes (back) up, the transport
+// subscribes our topics again (refreshPeerInfo), so a Loam that started after us still delivers to us.
+let healthTimer: any = null;
+function watchHealth() {
+  if (healthTimer) return;
+  healthTimer = setInterval(() => { Promise.resolve(T.refreshPeerInfo()).catch(() => {}); }, 15_000);
 }
 
 async function deviceId(): Promise<string> {
@@ -140,6 +154,7 @@ export async function watch(repos: { key: string; readKey?: string }[], cb: (p: 
     const late = unjoined();   // repos added while the node was starting
     if (late.length) { await T.join(late); late.forEach((t) => joined.add(t)); }
     storage.diag(`delivery: listening on ${keys.size} repo topic(s) via ${T.usingServiceBackend() ? "Loam" : "own node"}`);
+    watchHealth();
     pull();
   } catch (e: any) {
     state = "unavailable"; unavailableAt = Date.now(); lastError = String(e?.message ?? e);
@@ -148,11 +163,13 @@ export async function watch(repos: { key: string; readKey?: string }[], cb: (p: 
 }
 
 /** Ask Store for what was published while we weren't listening (the latest pointer per repo). */
-export function pull(): void {
-  if (state !== "on") return;
-  Promise.resolve(T.storeSync(receive))
-    .then((r: any) => storage.diag(`delivery: store pull done${r?.msgs !== undefined ? ` (${r.msgs} msgs)` : ""}`))
-    .catch((e: any) => storage.diag(`delivery: store pull failed: ${e?.message ?? e}`));
+// On Loam >= 0.0.66 the transport first checks with Loam (and repairs a missed register or topic), then
+// Loam says whether it took the pull; the answer is kept for the app to show. Resolves to that answer.
+export function pull(): Promise<string> {
+  if (state !== "on") return Promise.resolve("");
+  return Promise.resolve(T.storeSync(receive))
+    .then((r: any) => { lastPull = String(r?.detail ?? ""); storage.diag(`delivery: ${lastPull || "store pull done"}${r?.msgs ? ` (${r.msgs} msgs)` : ""}`); return lastPull; })
+    .catch((e: any) => { lastPull = `store pull failed: ${e?.message ?? e}`; storage.diag(`delivery: ${lastPull}`); return lastPull; });
 }
 
 /**
@@ -165,7 +182,11 @@ export async function pullAndWait(repoKeys: string[], ms = 8000): Promise<void> 
   const since = Date.now();
   while (state === "starting" && Date.now() - since < ms) await new Promise((r) => setTimeout(r, 250));   // first open: the node is still coming up
   if (state !== "on" || !repoKeys.length) return;
-  pull();
+  const said = await pull();
+  if (/refused|isn't approved/.test(said)) return;          // Loam said no: waiting won't help (the reason is shown)
+  // Loam took the pull: its answer can queue behind other apps' pulls, so give it longer. A note that
+  // arrives after this still triggers the update (onPointer), it just isn't waited for.
+  if (/accepted/.test(said)) ms = Math.max(ms, 15000);
   while (Date.now() - since < ms) {
     if (repoKeys.every((k) => (heard.get(k) ?? 0) >= since)) return;
     await new Promise((r) => setTimeout(r, 250));

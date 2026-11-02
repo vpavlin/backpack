@@ -92,7 +92,7 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
   await delivery.loaded();   // a saved note counts too (one we couldn't follow last time)
   const d = delivery.pointerFor(repo.key), ds = delivery.status();
   if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
-  else sources.push({ name: "Delivery", error: ds.state === "on" ? "nothing yet" : ds.state === "unavailable" ? "Loam not available" : "starting" });
+  else sources.push({ name: "Delivery", error: ds.state === "on" ? `nothing yet${ds.pull ? ` (${ds.pull.replace(/^store: /, "")})` : ""}` : ds.state === "unavailable" ? "Loam not available" : "starting" });
   const urls = uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])].map(safePointerUrl).filter((u): u is string => !!u)).slice(0, LIMITS.pointers);
   if (!settings.get().webPointers) { if (urls.length) sources.push({ name: "web", error: "off in Settings" }); }
   else await Promise.all(urls.map(async (url) => {
