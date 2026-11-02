@@ -75,6 +75,14 @@ Item {
     // two sides: "subs" = repos you follow (and pay for), "repos" = repos you publish
     property string mode: ""
     property string selSub: ""
+    // a repo's app list: by name, or newest update first
+    property string appSort: "name"
+    function sortApps(list, addedOf) {
+        var a = (list || []).slice()
+        if (root.appSort === "updated") a.sort(function (x, y) { return (addedOf(y) || "").localeCompare(addedOf(x) || "") })
+        else a.sort(function (x, y) { return (x.label || x.id || "").toLowerCase().localeCompare((y.label || y.id || "").toLowerCase()) })
+        return a
+    }
     readonly property var curSub: { var l = root.st.subs || []; for (var i = 0; i < l.length; i++) if (l[i].key === root.selSub) return l[i]; return null }
     readonly property var subJobs: { var o = []; for (var i = 0; i < st.jobs.length; i++) if (st.jobs[i].repo === "sub_" + root.selSub) o.push(st.jobs[i]); return o }
     readonly property var curJobs: { var o = []; for (var i = 0; i < st.jobs.length; i++) if (st.jobs[i].repo === root.sel) o.push(st.jobs[i]); return o }
@@ -172,6 +180,18 @@ Item {
     }
     component T: Text { color: root.cText; font.pixelSize: 14; textFormat: Text.PlainText; wrapMode: Text.Wrap }
     component Sub: Text { color: root.cSub; font.pixelSize: 12; textFormat: Text.PlainText; wrapMode: Text.Wrap }
+    component SortBy: Row {
+        spacing: 10
+        Text { text: "sort by"; color: root.cSub; font.pixelSize: 12; textFormat: Text.PlainText }
+        Repeater {
+            model: [{ k: "name", t: "name" }, { k: "updated", t: "last update" }]
+            Text {
+                text: modelData.t; font.pixelSize: 12; textFormat: Text.PlainText
+                color: root.appSort === modelData.k ? root.cAccent : root.cSub; font.underline: root.appSort === modelData.k
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.appSort = modelData.k }
+            }
+        }
+    }
     component Badge: Rectangle {
         property alias text: bt.text; property color tone: root.cAccent
         implicitWidth: bt.implicitWidth + 12; implicitHeight: 20; radius: 10; color: "transparent"; border.color: tone; border.width: 1
@@ -345,11 +365,15 @@ Item {
                         Layout.fillWidth: true; Layout.fillHeight: true; radius: 10; color: root.cSurface
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 12; spacing: 6
-                            T { text: "Apps (" + (root.cur ? root.cur.apps.length : 0) + ")"; font.bold: true }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                T { text: "Apps (" + (root.cur ? root.cur.apps.length : 0) + ")"; font.bold: true; Layout.fillWidth: true }
+                                SortBy {}
+                            }
                             Sub { visible: !!root.cur && root.cur.apps.length === 0; text: "No apps yet: add APK files or import an F-Droid repo, then Publish." }
                             ListView {
                                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
-                                model: root.cur ? root.cur.apps : []
+                                model: root.cur ? root.sortApps(root.cur.apps, function (a) { return a.versions && a.versions.length ? a.versions[0].added : "" }) : []
                                 delegate: Rectangle {
                                     width: ListView.view.width; height: appCol.implicitHeight + 14; radius: 8; color: root.cRaised
                                     ColumnLayout {
@@ -430,6 +454,56 @@ Item {
                             anchors.fill: parent; anchors.margins: 14; clip: true; contentHeight: subCol.implicitHeight
                             ColumnLayout {
                                 id: subCol; width: parent.width; spacing: 10
+                                // the repo's apps, from its signed index (read by backpack_core from Logos Storage)
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 12
+                                    T { text: "Apps" + (subPage.sx && subPage.sx.apps ? " (" + subPage.sx.apps.length + ")" : ""); font.bold: true; font.pixelSize: 16; Layout.fillWidth: true }
+                                    SortBy { visible: !!(subPage.sx && subPage.sx.apps && subPage.sx.apps.length) }
+                                    LogosButton { text: "Send to phone"; enabled: !!(subPage.sx && subPage.sx.link)
+                                        onClicked: linkDialog.showFor(subPage.sx.link, "Send to phone",
+                                            "Scan this in Backpack on your phone (+ Repo, then scan), or open the link there. The phone adds the repo and lists these apps to install.") }
+                                }
+                                Sub { visible: !!(subPage.sx && subPage.sx.appsEncrypted); Layout.fillWidth: true
+                                    text: "This repo's app list is encrypted: it opens only on its members' devices." }
+                                Sub { visible: !!subPage.sx && !subPage.sx.appsEncrypted && !subPage.sx.apps; Layout.fillWidth: true
+                                    text: subPage.sx && subPage.sx.hold ? "Reading the app list from Logos Storage… (it appears within a couple of minutes)" : "The app list appears after the first check (Check now)." }
+                                Sub { visible: !!(subPage.sx && subPage.sx.apps && subPage.sx.apps.length === 0); Layout.fillWidth: true; text: "No apps in this repo yet." }
+                                Repeater {
+                                    model: subPage.sx ? root.sortApps(subPage.sx.apps, function (a) { return a.latest ? a.latest.added : "" }) : []
+                                    Rectangle {
+                                        id: appCard
+                                        Layout.fillWidth: true; implicitHeight: appRow.implicitHeight + 16; radius: 8; color: root.cRaised
+                                        readonly property var l: modelData.latest || {}
+                                        RowLayout {
+                                            id: appRow; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.margins: 10; spacing: 12
+                                            Rectangle {
+                                                Layout.preferredWidth: 40; Layout.preferredHeight: 40; radius: 8; color: root.cSurface
+                                                // an icon this Qt can't decode (e.g. WebP without the plugin) falls back to the initial
+                                                Image { id: appIcon; anchors.fill: parent; anchors.margins: 2; visible: status === Image.Ready; source: modelData.iconFile ? "file://" + modelData.iconFile : ""
+                                                    fillMode: Image.PreserveAspectFit; asynchronous: true; sourceSize.width: 80; sourceSize.height: 80 }
+                                                Text { visible: appIcon.status !== Image.Ready; anchors.centerIn: parent; text: (modelData.label || modelData.id || "?").charAt(0).toUpperCase()
+                                                    color: root.cSub; font.pixelSize: 18; font.bold: true; textFormat: Text.PlainText }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true; spacing: 2
+                                                T { text: modelData.label || modelData.id; font.bold: true; Layout.fillWidth: true; wrapMode: Text.NoWrap; elide: Text.ElideRight }
+                                                Sub { text: modelData.id + (modelData.summary ? " · " + modelData.summary : ""); Layout.fillWidth: true; wrapMode: Text.NoWrap; elide: Text.ElideRight }
+                                                Sub { Layout.fillWidth: true
+                                                    text: (appCard.l.versionName || "?") + " (" + (appCard.l.versionCode || 0) + ") · " + root.mb(appCard.l.size || 0)
+                                                        + (appCard.l.added ? " · updated " + appCard.l.added.slice(0, 10) : "")
+                                                        + (modelData.versions > 1 ? " · " + modelData.versions + " versions kept" : "") }
+                                            }
+                                            Badge {
+                                                // only for a repo that names what followers hold (a mirror list, ADR 0015)
+                                                visible: !!(subPage.sx && !subPage.sx.mirrorOff && subPage.sx.hold && subPage.sx.hold.mirror) && !!(modelData.latest && modelData.latest.hosted)
+                                                readonly property string h: (modelData.latest && modelData.latest.hosted) || "no"
+                                                text: h === "held" ? "held here" : h === "fetching" ? "fetching…" : "not held yet"
+                                                tone: h === "held" ? root.cOk : h === "fetching" ? root.cAccent : root.cSub
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.cLine; visible: !!(subPage.sx && subPage.sx.apps && subPage.sx.apps.length) }
                                 // not paid: how to get in
                                 Sub { visible: !subPage.sPaid; Layout.fillWidth: true; font.pixelSize: 13
                                     text: subPage.sx && subPage.sx.members
@@ -638,8 +712,19 @@ Item {
     Popup {
         id: linkDialog; modal: true; anchors.centerIn: parent; width: 520; padding: 18
         property string link: ""; property bool priv: false; property var qr: null
+        property string title: "Invite link"; property string hint: ""
         background: Rectangle { radius: 10; color: root.cSurface; border.color: root.cLine }
+        // any link (a followed repo's, for "Send to phone"): the QR comes from backpack_core
+        function showFor(l, t, h) {
+            root.core("qr", [l], function (raw) {
+                var r = root.parse(raw)
+                if (!r || r.ok === false) { root.toast(r ? r.error : "No answer", true); return }
+                linkDialog.title = t; linkDialog.hint = h; linkDialog.link = l; linkDialog.priv = l.indexOf("&x=") >= 0 || l.indexOf("?x=") >= 0
+                linkDialog.qr = r.qr; qrCanvas.requestPaint(); linkDialog.open()
+            })
+        }
         function show() {
+            linkDialog.title = "Invite link"; linkDialog.hint = ""
             root.core("link", [root.sel], function (raw) {
                 var r = root.parse(raw)
                 if (!r || r.ok === false) { root.toast(r ? r.error : "No answer", true); return }
@@ -649,10 +734,11 @@ Item {
         onClosed: { link = ""; qr = null }
         ColumnLayout {
             width: parent.width; spacing: 10
-            T { text: "Invite link"; font.bold: true; font.pixelSize: 17 }
+            T { text: linkDialog.title; font.bold: true; font.pixelSize: 17 }
+            Sub { visible: linkDialog.hint !== ""; Layout.fillWidth: true; text: linkDialog.hint }
             Sub { visible: linkDialog.priv; color: root.cWarn; Layout.fillWidth: true; text: "🔒 This link carries the READ KEY: whoever has it can read the repo. Share it only with people you mean to, and not in public chats." }
-            Sub { visible: !!(root.cur && root.cur.members); Layout.fillWidth: true; text: "👥 Members repo: this link carries no key. It works only on devices you added under Members (after a publish); others see \"not a member\"." }
-            Sub { visible: !linkDialog.priv; Layout.fillWidth: true; text: "Open it on the phone (or scan the code in Backpack: + Repo) to add the repo." }
+            Sub { visible: linkDialog.hint === "" && !!(root.cur && root.cur.members); Layout.fillWidth: true; text: "👥 Members repo: this link carries no key. It works only on devices you added under Members (after a publish); others see \"not a member\"." }
+            Sub { visible: linkDialog.hint === "" && !linkDialog.priv; Layout.fillWidth: true; text: "Open it on the phone (or scan the code in Backpack: + Repo) to add the repo." }
             Canvas {
                 id: qrCanvas; Layout.alignment: Qt.AlignHCenter; width: 260; height: 260
                 onPaint: {

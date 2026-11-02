@@ -46,6 +46,8 @@ public:
     std::string repo(std::string slug);
     // The invite link and its QR matrix. A private repo's link carries the read key.
     std::string link(std::string slug);
+    // A QR matrix for any short text (a followed repo's link, for "Send to phone"). {"ok":true,"qr":{n,cells}}
+    std::string qr(std::string text);
     std::string makePrivate(std::string slug);
     std::string rotateReadKey(std::string slug);
     // {"node":url, "pointersGet":[...], "pointersPut":[...]} (fields optional)
@@ -133,6 +135,13 @@ private:
     bool m_mirrorEvents = false;
     std::map<std::string, long long> m_mirrorFetching;
     std::map<std::string, long long> m_mirrorListing;
+    // a followed repo's signed index being downloaded (index CID -> repo key, started ms), and icons (CID -> started)
+    std::map<std::string, std::pair<std::string, long long>> m_indexListing;
+    std::map<std::string, long long> m_iconListing;
+    void autoCheckSubs();   // every followed repo, quietly (no job), skipping busy ones
+    bool m_autoChecking = false;
+    void fetchSubIcons(const std::string& dir, const std::vector<std::string>& icons);
+    void subIndexDone(const std::string& cid, const std::string& key, bool success, const std::string& error);
     std::map<std::string, long long> m_mirrorDialed;
     // lists that arrived (possibly during a tick: sync calls to other modules run nested events)
     std::map<std::string, std::vector<std::string>> m_mirrorNewLists;

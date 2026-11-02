@@ -13,9 +13,10 @@
 
 using bp::json;
 namespace {
-const char* VERSION = "0.6.0";
+const char* VERSION = "0.6.1";
 std::string ok(json j = json::object()) { j["ok"] = true; return j.dump(); }
 std::string fail(const std::string& why) { return json{{"ok", false}, {"error", why}}.dump(); }
+std::string noteTopic(const std::string& id);   // defined below, with the Delivery helpers
 json qrMatrix(const std::string& text) {
     auto qr = qrcodegen::QrCode::encodeText(text.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
     int n = qr.getSize(); json cells = json::array();
@@ -49,6 +50,54 @@ void BackpackCoreImpl::onContextReady() {
     auto* mt = new QTimer(m_loop);
     QObject::connect(mt, &QTimer::timeout, m_loop, [this] { mirrorTick(); });
     mt->start(mirrorEvery * 1000);
+    // followed repos check for a newer update note by themselves: after 45 s, then every
+    // BACKPACK_SUBS_SEC (default 600). "Check now" stays for an immediate look.
+    int subsEvery = 600;
+    if (const char* e = std::getenv("BACKPACK_SUBS_SEC")) subsEvery = std::max(60, std::atoi(e));
+    QTimer::singleShot(45000, m_loop, [this] { autoCheckSubs(); });
+    auto* st = new QTimer(m_loop);
+    QObject::connect(st, &QTimer::timeout, m_loop, [this] { autoCheckSubs(); });
+    st->start(subsEvery * 1000);
+}
+
+void BackpackCoreImpl::autoCheckSubs() {
+    std::vector<std::string> keys; std::string dataDir;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        if (m_autoChecking) { fprintf(stderr, "Backpack: background check still running\n"); return; }
+        dataDir = m_dataDir;
+        // keep the loaded Subs alive while iterating (a temporary in the range-for would dangle)
+        try { bp::Subs all = bp::Subs::load(dataDir); for (auto& [k, v] : all.s["subs"].items()) keys.push_back(k); }
+        catch (std::exception& e) { fprintf(stderr, "Backpack: background check: %s\n", e.what()); return; }
+        if (keys.empty()) return;
+        m_autoChecking = true;
+    }
+    fprintf(stderr, "Backpack: background check of %zu followed repo(s)\n", keys.size());
+    std::thread([this, keys, dataDir]() {
+        for (auto& key : keys) {
+            std::string slug = subSlug(key);
+            {
+                std::lock_guard<std::recursive_mutex> lk(m_mtx);
+                if (m_busyRepo.count(slug)) continue;   // a job on it right now (Check now, pay, …)
+                m_busyRepo[slug] = 0;                   // 0 = the quiet background check
+            }
+            try {
+                bp::Subs x = bp::Subs::load(dataDir);
+                x.onlyKey = key;
+                x.fromDelivery = [this](const std::string& k) { return storeNotes(noteTopic(k)); };
+                if (x.s["subs"].contains(key)) {
+                    json r = x.refresh(key);
+                    fprintf(stderr, "Backpack: background check of %s: update #%lld\n", key.substr(0, 8).c_str(), (long long)r.value("seq", 0));
+                }
+            } catch (std::exception& e) { fprintf(stderr, "Backpack: background check of %s: %s\n", key.c_str(), e.what()); }
+            catch (...) {}
+            std::lock_guard<std::recursive_mutex> lk(m_mtx);
+            auto b = m_busyRepo.find(slug);
+            if (b != m_busyRepo.end() && b->second == 0) m_busyRepo.erase(b);
+        }
+        { std::lock_guard<std::recursive_mutex> lk(m_mtx); m_autoChecking = false; }
+        onLoop([this] { mirrorTick(); });   // hold what the new notes name, read new app lists
+    }).detach();
 }
 
 // Paid repos publish themselves when someone joins or a device is taken off (not when a membership only
@@ -324,7 +373,29 @@ std::string BackpackCoreImpl::snapshot() {
     json subs = json::array(), me = json::object();
     try {
         bp::Subs x = bp::Subs::load(m_dataDir); me = x.s["me"];
-        for (auto& [k, v] : x.s["subs"].items()) { json o = v; o["busy"] = m_busyRepo.count(subSlug(k)) > 0; subs.push_back(o); }
+        json held; try { held = json::parse(bp::readFile(m_dataDir + "/mirror.json")).value("held", json::object()); } catch (...) { held = json::object(); }
+        for (auto& [k, v] : x.s["subs"].items()) {
+            json o = v; o["busy"] = m_busyRepo.count(subSlug(k)) > 0;
+            // the repo's apps, from its signed index (subIndexDone), with what this Basecamp holds of each
+            try {
+                json a = json::parse(bp::readFile(m_dataDir + "/sub-apps/" + k + ".json"));
+                if (a.value("encrypted", false)) o["appsEncrypted"] = true;
+                json apps = a.value("apps", json::array());
+                // only a repo that publishes a mirror list asks its followers to hold its APKs (ADR 0015)
+                bool listed = o.contains("hold") && o["hold"].is_object() && o["hold"].contains("mirror");
+                for (auto& app : apps) {
+                    std::string ic = app.value("icon", std::string());
+                    std::error_code iec;
+                    if (!ic.empty() && bp::fs::file_size(m_dataDir + "/icons/" + ic, iec) > 0 && !iec) app["iconFile"] = m_dataDir + "/icons/" + ic;
+                    if (listed && app.contains("latest") && app["latest"].is_object()) {
+                        std::string c = app["latest"].value("cid", std::string());
+                        app["latest"]["hosted"] = !held.contains(c) ? "no" : held[c].value("pending", false) ? "fetching" : "held";
+                    }
+                }
+                o["apps"] = apps; o["appsSeq"] = a.value("seq", 0); o["appsAt"] = a.value("fetchedAt", std::string());
+            } catch (...) {}
+            subs.push_back(o);
+        }
     } catch (...) {}
     return ok(json{{"version", VERSION}, {"dataDir", m_dataDir}, {"lastNode", m_lastNode}, {"repos", repos}, {"jobs", jobs}, {"subs", subs}, {"me", me}, {"delivery", m_netStatus}, {"mirror", json::parse(m_mirrorStatus, nullptr, false)}});
 }
@@ -360,6 +431,10 @@ std::string BackpackCoreImpl::link(std::string slug) {
     } catch (std::exception& e) { return fail(e.what()); }
 }
 
+std::string BackpackCoreImpl::qr(std::string text) {
+    if (text.empty() || text.size() > 2000) return fail("Nothing to encode");
+    try { return ok(json{{"qr", qrMatrix(text)}}); } catch (std::exception& e) { return fail(e.what()); }
+}
 std::string BackpackCoreImpl::makePrivate(std::string slug) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!validSlug(slug) || m_busyRepo.count(slug)) return fail("The repo is busy");
@@ -581,12 +656,17 @@ std::string BackpackCoreImpl::follow(std::string link) {
 std::string BackpackCoreImpl::unfollow(std::string key) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (m_busyRepo.count(subSlug(key))) return fail("busy");
-    try { bp::Subs x = bp::Subs::load(m_dataDir); x.unfollow(key); return ok(); } catch (std::exception& e) { return fail(e.what()); }
+    try {
+        bp::Subs x = bp::Subs::load(m_dataDir); x.unfollow(key);
+        std::error_code ec; bp::fs::remove(m_dataDir + "/sub-apps/" + key + ".json", ec);   // its app list goes too
+        return ok();
+    } catch (std::exception& e) { return fail(e.what()); }
 }
 std::string BackpackCoreImpl::refreshSub(std::string key) {
     std::string dataDir = m_dataDir;
     return startJob("check", subSlug(key), [this, dataDir, key](Job& j) {
         BP_JOB_SUBS
+        x.onlyKey = key;   // save only this repo's entry: an unfollow or another repo's change meanwhile stays
         json r = x.refresh(key);
         if (r.contains("membershipError")) x.log("membership: " + r["membershipError"].get<std::string>());
         x.log("update note #" + std::to_string(r.value("seq", 0)));
@@ -604,6 +684,7 @@ std::string BackpackCoreImpl::payMembership(std::string key, std::string periods
     std::string dataDir = m_dataDir;
     return startJob("pay", subSlug(key), [this, dataDir, key, n, phoneLink, expectPrice](Job& j) {
         BP_JOB_SUBS
+        x.onlyKey = key;   // save only this repo's entry: an unfollow or another repo's change meanwhile stays
         json r = x.pay(key, n, phoneLink, expectPrice);
         x.afterChange(key);
         x.log("Done: the publisher's next update lets your devices in");
@@ -614,6 +695,7 @@ std::string BackpackCoreImpl::addMyDevice(std::string key, std::string phoneLink
     std::string dataDir = m_dataDir;
     return startJob("device", subSlug(key), [this, dataDir, key, phoneLink](Job& j) {
         BP_JOB_SUBS
+        x.onlyKey = key;   // save only this repo's entry: an unfollow or another repo's change meanwhile stays
         json r = x.addDevice(key, phoneLink);
         x.afterChange(key);
         return r.dump();
@@ -623,6 +705,7 @@ std::string BackpackCoreImpl::removeMyDevice(std::string key, std::string device
     std::string dataDir = m_dataDir;
     return startJob("device", subSlug(key), [this, dataDir, key, devicePk](Job& j) {
         BP_JOB_SUBS
+        x.onlyKey = key;   // save only this repo's entry: an unfollow or another repo's change meanwhile stays
         json r = x.removeDevice(key, devicePk);
         x.afterChange(key);
         return r.dump();
@@ -663,6 +746,23 @@ void BackpackCoreImpl::mirrorListDone(const std::string& payload) {
     json p = json::parse(payload, nullptr, false);
     if (!p.is_object()) return;
     std::string cid = p.value("sessionId", std::string());
+    auto ix = m_indexListing.find(cid);
+    if (ix != m_indexListing.end()) {
+        std::string key = ix->second.first; m_indexListing.erase(ix);
+        subIndexDone(cid, key, p.value("success", false), p.value("error", std::string()));
+        return;
+    }
+    if (m_iconListing.count(cid)) {
+        m_iconListing.erase(cid);
+        // downloaded into <cid>.part: only a complete, non-empty file becomes the icon (a cut-off download
+        // left an empty file that was never tried again)
+        std::string dir; { std::lock_guard<std::recursive_mutex> lk(m_mtx); dir = m_dataDir; }
+        std::string part = dir + "/icons/" + cid + ".part";
+        std::error_code ec;
+        if (p.value("success", false) && bp::fs::file_size(part, ec) > 0 && !ec) bp::fs::rename(part, dir + "/icons/" + cid, ec);
+        else bp::fs::remove(part, ec);
+        return;
+    }
     if (!m_mirrorListing.count(cid)) return;   // someone else's download
     m_mirrorListing.erase(cid);
     std::string dir;
@@ -682,6 +782,67 @@ void BackpackCoreImpl::mirrorListDone(const std::string& payload) {
     } else fprintf(stderr, "Backpack mirror: list %s failed: %s\n", cid.c_str(), p.value("error", std::string()).c_str());
     bp::fs::remove(tmp, ec);
     onLoop([this] { mirrorTick(); });
+}
+
+// A followed repo's index arrived: check its signature with the repo key, keep a summary of its apps for the
+// page (sub-apps/<key>.json) and fetch the icons it names. An encrypted index (members repo) can't be read
+// here: the page says so. Runs on the module's event loop.
+void BackpackCoreImpl::subIndexDone(const std::string& cid, const std::string& key, bool success, const std::string& error) {
+    std::string dir; { std::lock_guard<std::recursive_mutex> lk(m_mtx); dir = m_dataDir; }
+    std::string tmp = dir + "/mirror-tmp/" + cid + ".index.json";
+    std::error_code ec;
+    if (!success) { fprintf(stderr, "Backpack: index %s of %s failed: %s\n", cid.c_str(), key.c_str(), error.c_str()); bp::fs::remove(tmp, ec); return; }
+    // unfollowed while it downloaded: keep nothing for it
+    try { if (!bp::Subs::load(dir).s["subs"].contains(key)) { bp::fs::remove(tmp, ec); return; } } catch (...) {}
+    json out{{"indexCid", cid}, {"fetchedAt", bp::nowIso()}};
+    std::vector<std::string> icons;
+    try {
+        std::string raw = bp::readFile(tmp);
+        if (raw.size() > (1u << 20)) throw bp::Err("index over 1 MB");
+        json env = json::parse(raw);
+        if (env.contains("enc")) out["encrypted"] = true;
+        else {
+            json b = bp::open(env, key, "index");   // throws unless signed by the repo key
+            out["seq"] = b.value("seq", 0); out["name"] = b.value("name", std::string());
+            json apps = json::array();
+            for (auto& a : b.value("apps", json::array())) {
+                if (!a.is_object() || apps.size() >= 500) continue;
+                json vs = a.value("versions", json::array());
+                if (!vs.is_array() || vs.empty() || !vs[0].is_object()) continue;
+                const json& v = vs[0];
+                json latest{{"versionName", v.value("versionName", std::string())}, {"versionCode", v.value("versionCode", 0LL)},
+                            {"size", v.value("size", 0LL)}, {"added", v.value("added", std::string())}, {"cid", v.value("cid", std::string())}};
+                std::string icon = a.contains("icon") && a["icon"].is_string() ? a["icon"].get<std::string>() : std::string();
+                if (!icon.empty() && !isCid(icon)) icon.clear();
+                apps.push_back(json{{"id", a.value("id", std::string())}, {"label", a.value("label", a.value("id", std::string()))},
+                                    {"summary", a.value("summary", std::string())}, {"icon", icon}, {"versions", (int)vs.size()}, {"latest", latest}});
+                if (!icon.empty()) icons.push_back(icon);
+            }
+            out["apps"] = apps;
+        }
+        bp::fs::create_directories(dir + "/sub-apps", ec);
+        bp::writeFileAtomic(dir + "/sub-apps/" + key + ".json", out.dump(), 0600);
+    } catch (std::exception& e) { fprintf(stderr, "Backpack: index %s of %s unusable: %s\n", cid.c_str(), key.c_str(), e.what()); }
+    bp::fs::remove(tmp, ec);
+    fetchSubIcons(dir, icons);
+}
+
+// Icons (public, small) into icons/<cid>, via <cid>.part. Called when a list arrives and at every tick, so
+// one that failed or was cut off (a restart) is tried again; one already running is left alone for 10 min.
+void BackpackCoreImpl::fetchSubIcons(const std::string& dir, const std::vector<std::string>& icons) {
+    long long now = mirrorNowMs();
+    std::error_code ec;
+    bp::fs::create_directories(dir + "/icons", ec);
+    for (auto& ic : icons) {
+        if (!isCid(ic)) continue;
+        std::error_code fec;
+        if (bp::fs::file_size(dir + "/icons/" + ic, fec) > 0 && !fec) continue;
+        auto cur = m_iconListing.find(ic);
+        if (cur != m_iconListing.end() && now - cur->second < 10 * 60000) continue;
+        m_iconListing[ic] = now;
+        try { modules().storage_module.downloadToUrlAsyncResult(ic, dir + "/icons/" + ic + ".part", false, 65536, false, true, [](logos::AsyncResult<StdLogosResult>) {}, 60000); }
+        catch (...) { m_iconListing.erase(ic); }
+    }
 }
 
 // Hold what the followed repos' latest pointers name; drop what nothing names any more. fetch() has no
@@ -720,6 +881,26 @@ void BackpackCoreImpl::mirrorTickBody() {
     std::map<std::string, std::set<std::string>> want;   // cid -> repo keys
     std::set<std::string> listsInUse;
     json perRepo = json::object();
+    // every followed repo's app list (shown on its page): download its signed index when it changed
+    for (auto& [key, x] : subs.items()) {
+        if (!x.contains("hold")) continue;
+        std::string I = x["hold"].value("index", std::string());
+        if (I.empty() || !isCid(I)) continue;
+        std::string have; json known;
+        try { known = json::parse(bp::readFile(dir + "/sub-apps/" + key + ".json")); have = known.value("indexCid", std::string()); } catch (...) {}
+        if (have == I) {   // list unchanged: just make sure its icons are all here
+            std::vector<std::string> icons;
+            for (auto& a : known.value("apps", json::array())) if (a.is_object() && a.contains("icon") && a["icon"].is_string() && !a["icon"].get<std::string>().empty()) icons.push_back(a["icon"]);
+            fetchSubIcons(dir, icons);
+            continue;
+        }
+        auto cur = m_indexListing.find(I);
+        if (cur != m_indexListing.end() && now - cur->second.second < 10 * 60000) continue;
+        std::error_code ec; bp::fs::create_directories(dir + "/mirror-tmp", ec);
+        m_indexListing[I] = {key, now};
+        try { modules().storage_module.downloadToUrlAsyncResult(I, dir + "/mirror-tmp/" + I + ".index.json", false, 65536, false, true, [](logos::AsyncResult<StdLogosResult>) {}, 60000); }
+        catch (...) { m_indexListing.erase(I); }
+    }
     for (auto& [key, x] : subs.items()) {
         if (x.value("mirrorOff", false) || !x.contains("hold")) continue;
         const json& h = x["hold"];

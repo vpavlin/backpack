@@ -56,7 +56,20 @@ struct Subs {
         if (!x.s.contains("me") || !x.s["me"].is_object()) x.s["me"] = json::object();
         return x;
     }
-    void save() { std::error_code ec; fs::create_directories(fs::path(file).parent_path(), ec); writeFileAtomic(file, s.dump(2), 0600); }
+    // onlyKey: save just that repo's entry over what is on disk now (a background check must not overwrite
+    // a follow, an unfollow or another repo's check that happened while it waited on the network)
+    std::string onlyKey;
+    void save() {
+        std::error_code ec; fs::create_directories(fs::path(file).parent_path(), ec);
+        if (!onlyKey.empty()) {
+            Subs now = load(fs::path(file).parent_path().string());
+            if (!now.s["subs"].contains(onlyKey)) return;   // unfollowed meanwhile: keep it gone
+            now.s["subs"][onlyKey] = s["subs"][onlyKey];
+            writeFileAtomic(file, now.s.dump(2), 0600);
+            return;
+        }
+        writeFileAtomic(file, s.dump(2), 0600);
+    }
     json& sub(const std::string& key) { if (!s["subs"].contains(key)) throw Err("you don't follow that repo"); return s["subs"][key]; }
 
     void setMe(const json& me) {
@@ -74,6 +87,7 @@ struct Subs {
         if (!x.contains("name") || !r.name.empty()) x["name"] = r.name.empty() ? "a Backpack repo" : r.name;
         x["followed"] = x.value("followed", nowIso());
         save();
+        onlyKey = r.key;   // from here on save only this repo's entry (it may be unfollowed meanwhile)
         return refresh(r.key);
     }
     void unfollow(const std::string& key) { s["subs"].erase(key); save(); }
