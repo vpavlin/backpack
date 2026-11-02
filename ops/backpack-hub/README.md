@@ -11,8 +11,9 @@ announces every repo's update note over Logos Delivery **until Store holds it**:
 
 Robustness:
 - `backpack-hub.service` runs the daemon in the foreground with `Restart=always`: a crash is back in ~15 s.
-- `backpack-hub-watchdog.timer` (every 10 min) restarts it when the announcer is stuck: no Store check
-  for 30 min, or nothing confirmed for 2.5 h (a hung Delivery node keeps the process alive).
+- `backpack-hub-watchdog.timer` (every 10 min) restarts it when the announcer is stuck: nothing
+  confirmed in Store for 2.5 h (a hung Delivery node keeps the process alive; with every note
+  confirmed the core is quiet until the hourly re-send, so "no check for a while" is normal).
 
 Set up (paths are the crib's; adjust):
 
