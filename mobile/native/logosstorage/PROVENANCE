@@ -1,10 +1,12 @@
 # Backpack's Logos Storage libraries — see docs/adr/0005-phone-libstorage.md.
 source      logos-storage-nim d82d0d39 (PR #1540: download swarms from DHT providers)
-            + cherry-pick a2a353e (libStorageAndroid build task) = worktree ~/work/lsn-1540 @ 1c6b08b
+            + cherry-pick a2a353e (libStorageAndroid build task)
+            + presence fix for connect()ed peers (d7c9c28) + cancel stops the network download (6f624e4)
+              = vpavlin/nim-codex perf/admit-window-presence 6f624e4 (worktree ~/work/lsn-1540)
 patch       patches/nim-libp2p/0001-tcp-dial-bind-same-family.patch
 build       CPU=arm64 ABIDIR=arm64-v8a ./env.sh nim libStorageAndroid build.nims  (NDK 27.1.12297006); llvm-strip --strip-debug
             CPU=amd64 ABIDIR=x86_64 … (emulator tests only, BACKPACK_EMU=1)
-sha256      52fb905ee32c8f70  arm64-v8a/libstorage.so
+sha256      1df06768e739796d  arm64-v8a/libstorage.so
 sha256      4da9105d797657e7  arm64-v8a/liblogos_storage_jni.so
 sha256      58f8df82e2f5fa4c  x86_64/libstorage.so
 history     2026-09-28 Scala's prebuilt (6af2049) crashed in storage_fetch on arm64; 2026-10-22 rebuilt

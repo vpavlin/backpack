@@ -165,9 +165,13 @@ export interface SizeRule { exact?: number; max?: number }
 export async function getFile(cid: string, path: string, peers: Peer[], onStage?: (s: string) => void, total = 0, onProgress?: (p: Progress) => void, size: SizeRule = {}): Promise<string> {
   // Through Loam when it has Storage (loam-transport ADR 0020): Loam fetches in the background, so the
   // download survives this app being closed, and one cache serves every app. Else our own node.
+  // A fresh download of this CID: an earlier cancel of it no longer applies (it blocked every later try).
+  cancelled.delete(cid);
   if (await loamAvailable()) {
     try { return await getViaLoam(cid, path, peers, onStage, onProgress, size); }
     catch (e: any) {
+      // Cancelled: make sure Loam drops the job too (a re-fetch may have joined it again), then report it.
+      if (cancelled.has(cid) || isCancelled(e)) { cancelled.delete(cid); try { await loam.cancel(cid); } catch { /* */ } throw new Error(CANCELLED); }
       // Loam caps one file at 512 MiB; an encrypted file is a little bigger than its APK (audit PR-7).
       // That one refusal falls back to our own node; any other error stands.
       if (!/too large/i.test(String(e?.message ?? e))) throw e;
@@ -265,10 +269,13 @@ async function getViaLoam(cid: string, path: string, peers: Peer[], onStage: ((s
     // "none": Loam forgot the job (cache cleared, file evicted, Loam restarted); no answer: Loam was
     // restarted or killed. "failed: stalled": Loam's job got no data for minutes (network changed). Ask
     // again, a few times.
+    // a cancel removes us from Loam's job, which then reads "none": that's not a lost job to fetch again
+    checkCancel(cid);
     const lost = !st || st.state === "none" || (st.state === "failed" && /^stalled/.test(st.error ?? ""));
     if (lost && restarts++ < 3) {
       diag(`loam job ${cid.slice(-10)} ${st ? st.state + (st.error ? ` (${st.error})` : "") : "no answer"}: fetching again`);
       await new Promise((r) => setTimeout(r, 2000));
+      checkCancel(cid);
       try { st = await loam.fetch(cid, peers.slice(0, 8)); } catch { st = null; }
     }
   }
