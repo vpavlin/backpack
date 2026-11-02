@@ -1,0 +1,4 @@
+HOME=/home/vpavlin/backpack-hub/home
+LOGOSCTL_CONFIG_DIR=/home/vpavlin/backpack-hub/cfg
+QT_QPA_PLATFORM=offscreen
+BACKPACK_DIR=/home/vpavlin/.backpack

@@ -1,0 +1,5 @@
+[Unit]
+Description=Restart backpack-hub when its announcer is stuck
+[Service]
+Type=oneshot
+ExecStart=/home/vpavlin/backpack-hub/watchdog.sh

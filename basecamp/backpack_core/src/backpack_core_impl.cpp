@@ -13,7 +13,7 @@
 
 using bp::json;
 namespace {
-const char* VERSION = "0.6.1";
+const char* VERSION = "0.6.2";
 std::string ok(json j = json::object()) { j["ok"] = true; return j.dump(); }
 std::string fail(const std::string& why) { return json{{"ok", false}, {"error", why}}.dump(); }
 std::string noteTopic(const std::string& id);   // defined below, with the Delivery helpers
@@ -42,7 +42,14 @@ void BackpackCoreImpl::onContextReady() {
     if (!m_loop) m_loop = new QObject();   // lives on this (the module's) event-loop thread
     startWatcher();
     // calls to other modules wait until the module has loaded (the runtime rejects them from here)
-    QTimer::singleShot(8000, m_loop, [this] { announceDue(); });
+    // update notes (the announcer): first look after 8 s, then every BACKPACK_NOTE_SEC (default 60)
+    int noteEvery = 60;
+    if (const char* e = std::getenv("BACKPACK_NOTE_SEC")) noteEvery = std::max(15, std::atoi(e));
+    if (const char* e = std::getenv("BACKPACK_RESEND_SEC")) m_resendSec = std::max(300, std::atoi(e));
+    QTimer::singleShot(8000, m_loop, [this] { noteTick(); });
+    auto* nt = new QTimer(m_loop);
+    QObject::connect(nt, &QTimer::timeout, m_loop, [this] { noteTick(); });
+    nt->start(noteEvery * 1000);
     // mirroring (ADR 0015): first look after 20 s, then every BACKPACK_MIRROR_SEC (default 120)
     int mirrorEvery = 120;
     if (const char* e = std::getenv("BACKPACK_MIRROR_SEC")) mirrorEvery = std::max(15, std::atoi(e));
@@ -154,7 +161,8 @@ void BackpackCoreImpl::watchOnce(const std::string& slug) {
 
 // ── Logos Delivery: update notes out (loam_core), followed repos' notes in (Store) ──────────────────
 namespace {
-const long long kResendSec = 12 * 3600;   // Store keeps a message for a limited time: send it again
+// a note not yet seen in Store is checked (and sent again) after these delays, then every 15 min
+const long long kVerifyAfter[] = {90, 180, 300, 600, 900};
 const char* kPreset = "logos.test";        // the network Backpack phones are on (cluster 2)
 const int kCluster = 2, kShards = 8;
 const char* kEntry[] = {
@@ -191,35 +199,114 @@ void BackpackCoreImpl::onLoop(std::function<void()> fn) {
     if (m_loop) QTimer::singleShot(0, m_loop, std::move(fn));
 }
 
-// Every published repo whose note hasn't gone out in the last 12 hours (all of them after a start).
-void BackpackCoreImpl::announceDue() {
-    std::vector<std::string> due;
-    {
-        std::lock_guard<std::recursive_mutex> lk(m_mtx);
-        std::error_code ec; long long now = nowSec();
-        if (bp::fs::is_directory(m_dataDir, ec))
-            for (auto& e : bp::fs::directory_iterator(m_dataDir, ec)) {
-                std::string slug = e.path().filename().string();
-                if (!bp::fs::exists(e.path() / "latest.json") || !bp::fs::exists(e.path() / "key.pem")) continue;
-                if (now - m_netSentAt[slug] >= kResendSec) due.push_back(slug);
-            }
-    }
-    for (auto& s : due) announce(s);
+// Kept for the watcher thread: the note tick runs on the loop.
+void BackpackCoreImpl::announceDue() { onLoop([this] { noteTick(); }); }
+
+// A repo was published here: send its new note now (the tick would find it within a minute anyway).
+void BackpackCoreImpl::announce(const std::string& slug) {
+    (void)slug;
+    onLoop([this] { noteTick(); });
 }
 
-// Queue the repo's current note (latest.json, already signed) for Delivery. Any thread.
-void BackpackCoreImpl::announce(const std::string& slug) {
-    std::lock_guard<std::recursive_mutex> lk(m_mtx);
-    try {
-        bp::Repo r = bp::Repo::load(repoDir(slug));
-        std::string text = bp::readFile((bp::fs::path(repoDir(slug)) / "latest.json").string());
-        if (text.empty() || text.size() > 8192) return;
-        std::string topic = noteTopic(r.pointerId());
-        for (auto it = m_netQueue.begin(); it != m_netQueue.end(); ) it = it->first == topic ? m_netQueue.erase(it) : it + 1;
-        m_netQueue.emplace_back(topic, text);
-        m_netSentAt[slug] = nowSec();
-    } catch (...) { return; }
+// Queue a topic's current note for Delivery and schedule the Store check. m_mtx held by the caller.
+void BackpackCoreImpl::noteSend(const std::string& topic) {
+    NoteState& n = m_notes[topic];
+    for (auto it = m_netQueue.begin(); it != m_netQueue.end(); ) it = it->first == topic ? m_netQueue.erase(it) : it + 1;
+    m_netQueue.emplace_back(topic, n.text);
+    long long now = nowSec();
+    n.sentAt = now;
+    n.nextAt = now + kVerifyAfter[std::min(n.attempts, (int)(sizeof(kVerifyAfter) / sizeof(kVerifyAfter[0])) - 1)];
+    n.attempts++;
+    m_netSentAt[n.slug] = now;
     onLoop([this] { netFlush(); });
+}
+
+// The announcer (loop thread, every BACKPACK_NOTE_SEC, default 60). For every published repo here:
+//  - a note that changed (published by this module, the CLI or CI) is sent at once;
+//  - a sent note is looked up in Store; until Store holds it, it is sent again (90 s, 3, 5, 10, then
+//    every 15 min) and the reason is kept for the view;
+//  - a note Store holds is sent again every BACKPACK_RESEND_SEC (default 1 h), so it never ages out.
+// Store is the proof: phones that open later read the note from there.
+void BackpackCoreImpl::noteTick() {
+    std::vector<std::pair<std::string, std::string>> repos;   // slug, dir
+    std::string dataDir;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        dataDir = m_dataDir;
+    }
+    std::error_code ec;
+    if (bp::fs::is_directory(dataDir, ec))
+        for (auto& e : bp::fs::directory_iterator(dataDir, ec)) {
+            if (!bp::fs::exists(e.path() / "latest.json") || !bp::fs::exists(e.path() / "key.pem") || !bp::fs::exists(e.path() / "repo.json")) continue;
+            repos.emplace_back(e.path().filename().string(), e.path().string());
+        }
+    long long now = nowSec();
+    std::vector<std::string> toCheck;
+    {
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        for (auto& [slug, dir] : repos) {
+            std::string text, topic;
+            try {
+                text = bp::readFile((bp::fs::path(dir) / "latest.json").string());
+                if (text.empty() || text.size() > 8192) continue;
+                topic = noteTopic(bp::Repo::load(dir).pointerId());
+            } catch (...) { continue; }
+            NoteState& n = m_notes[topic];
+            n.slug = slug;
+            if (n.text != text) {                       // a new note (or the first look after a start)
+                n.text = text; n.attempts = 0; n.confirmedAt = 0; n.error.clear();
+                fprintf(stderr, "Backpack: note for %s: sending\n", slug.c_str());
+                noteSend(topic);
+            } else if (n.confirmedAt && now - n.confirmedAt >= m_resendSec && now - n.sentAt >= m_resendSec) {
+                n.attempts = 0;                         // keep it fresh in Store
+                noteSend(topic);
+            } else if (n.sentAt && !n.checking && now >= n.nextAt && (!n.confirmedAt || n.confirmedAt < n.sentAt)) {
+                n.checking = true;
+                toCheck.push_back(topic);
+            }
+        }
+    }
+    // Store lookups wait on the network: on a worker thread, never the loop, and ONE AT A TIME (seven repos
+    // checked at once = 42 parallel store queries, which the node answered with nulls)
+    if (toCheck.empty()) return;
+    std::thread([this, toCheck]() {
+        for (auto& topic : toCheck) {
+            std::string text, err; bool found = false;
+            { std::lock_guard<std::recursive_mutex> lk(m_mtx); text = m_notes[topic].text; }
+            try {
+                for (auto& got : storeNotes(topic)) {
+                    std::string a = got, b = text;
+                    while (!a.empty() && isspace((unsigned char)a.back())) a.pop_back();
+                    while (!b.empty() && isspace((unsigned char)b.back())) b.pop_back();
+                    if (a == b) { found = true; break; }
+                }
+                if (!found) err = "not in Store yet";
+            } catch (std::exception& e) { err = e.what(); }
+            std::lock_guard<std::recursive_mutex> lk(m_mtx);
+            NoteState& n = m_notes[topic];
+            n.checking = false;
+            if (n.text != text) continue;               // a newer note took its place meanwhile
+            if (found) {
+                n.confirmedAt = nowSec(); n.error.clear();
+                fprintf(stderr, "Backpack: note for %s is in Store (try %d)\n", n.slug.c_str(), n.attempts);
+            } else {
+                n.error = err;
+                fprintf(stderr, "Backpack: note for %s: %s, sending again (try %d)\n", n.slug.c_str(), err.c_str(), n.attempts + 1);
+                noteSend(topic);
+            }
+        }
+        // the announcer's state for a watchdog (headless hub): when it last checked, what Store holds
+        try {
+            std::lock_guard<std::recursive_mutex> lk(m_mtx);
+            json notes = json::object(); long long lastOk = 0;
+            for (auto& [t, n] : m_notes) {
+                if (n.slug.empty()) continue;
+                notes[n.slug] = json{{"confirmedAt", n.confirmedAt}, {"sentAt", n.sentAt}, {"attempts", n.attempts}, {"error", n.error}};
+                lastOk = std::max(lastOk, n.confirmedAt);
+            }
+            bp::writeFileAtomic(m_dataDir + "/announcer.json", json{{"checkedAt", nowSec()}, {"lastConfirmedAt", lastOk}, {"notes", notes}}.dump(1), 0644);
+        } catch (...) {}
+    }).detach();
 }
 
 // Bring up the shared node once (loop thread). Another app may have started it already: then
@@ -261,6 +348,7 @@ void BackpackCoreImpl::netFlush() {
             modules().loam_core.sendSealedAsync(topic, b64, [this, topic](std::string err) {
                 std::lock_guard<std::recursive_mutex> lk(m_mtx);
                 m_netSent[topic] = err.empty() ? bp::nowIso() : "failed: " + err;
+                if (!err.empty()) m_notes[topic].error = "send failed: " + err;
             });
         };
         bool joined; { std::lock_guard<std::recursive_mutex> lk(m_mtx); joined = m_netJoined.count(topic) > 0; }
@@ -359,7 +447,15 @@ std::string BackpackCoreImpl::snapshot() {
         std::sort(slugs.begin(), slugs.end());
         for (auto& s : slugs) {
             try { json r = bp::Repo::load(repoDir(s)).summary(); r["busy"] = m_busyRepo.count(s) > 0;
-                  auto sent = m_netSent.find(noteTopic(r.value("pointerId", std::string()))); r["noteSent"] = sent == m_netSent.end() ? json() : json(sent->second); r.erase("apps"); r["appCount"] = bp::Repo::load(repoDir(s)).s["apps"].size(); repos.push_back(r); }
+                  std::string ntopic = noteTopic(r.value("pointerId", std::string()));
+                  auto sent = m_netSent.find(ntopic); r["noteSent"] = sent == m_netSent.end() ? json() : json(sent->second);
+                  auto ns = m_notes.find(ntopic);
+                  if (ns != m_notes.end() && ns->second.sentAt) {
+                      const NoteState& n = ns->second;
+                      bool ok = n.confirmedAt && n.confirmedAt >= n.sentAt - 5;
+                      r["note"] = json{{"state", ok ? "inStore" : n.confirmedAt ? "refreshing" : n.attempts > 1 ? "retrying" : "sending"},
+                                       {"sentAtMs", n.sentAt * 1000}, {"confirmedAtMs", n.confirmedAt * 1000}, {"attempts", n.attempts}, {"error", n.error}};
+                  } r.erase("apps"); r["appCount"] = bp::Repo::load(repoDir(s)).s["apps"].size(); repos.push_back(r); }
             catch (std::exception& e) { repos.push_back(json{{"slug", s}, {"error", e.what()}}); }
         }
     }

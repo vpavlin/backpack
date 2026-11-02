@@ -123,6 +123,13 @@ private:
     std::deque<std::pair<std::string, std::string>> m_netQueue;
     std::map<std::string, std::string> m_netSent;
     std::map<std::string, long long> m_netSentAt;
+    // Update notes until Store has them (any publisher: this module, the CLI, CI). Per topic: the note text,
+    // when it was sent, when Store was seen holding it, how many tries, the last problem.
+    struct NoteState { std::string slug, text, error; long long sentAt = 0, confirmedAt = 0, nextAt = 0; int attempts = 0; bool checking = false; };
+    std::map<std::string, NoteState> m_notes;
+    long long m_resendSec = 3600;
+    void noteTick();                               // loop thread: new notes, checks, re-sends
+    void noteSend(const std::string& topic);       // queue this topic's current note (m_mtx held by caller)
     void netStart();
     void netFlush();
     void announce(const std::string& slug);

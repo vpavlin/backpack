@@ -118,8 +118,13 @@ Item {
     function noteLine() {
         if (!root.cur) return ""
         var d = root.st.delivery || "off", sent = root.curListed ? root.curListed.noteSent : null
-        var t = "Update note: over Delivery"
-        if (sent && String(sent).indexOf("failed") === 0) t += " (" + sent + ")"
+        var t = "Update note: over Delivery", n = root.curListed ? root.curListed.note : null
+        // the announcer's proof (backpack_core 0.6.2): Store holds the note, or why not yet
+        if (n && n.state === "inStore") t += " · in Store (checked " + root.when(n.confirmedAtMs) + ")"
+        else if (n && n.state === "refreshing") t += " · sent again to keep it in Store (" + root.when(n.sentAtMs) + ")"
+        else if (n && n.state === "retrying") t += " · not in Store yet, try " + n.attempts + (n.error ? " (" + n.error + ")" : "")
+        else if (n && n.state === "sending") t += " · sent " + root.when(n.sentAtMs) + ", checking Store…"
+        else if (sent && String(sent).indexOf("failed") === 0) t += " (" + sent + ")"
         else if (sent) t += " (sent " + root.when(Date.parse(sent)) + ")"
         else if (d === "Connected") t += (root.cur.seq ? " (sent at the next publish)" : "")
         else if (d.indexOf("error") === 0) t += " (" + d + ")"
@@ -128,7 +133,11 @@ Item {
         if (root.cur.pointersPut.length) t += " · sent via " + root.cur.pointersPut.join(", ")
         return t
     }
-    function noteBad() { var d = root.st.delivery || ""; return d.indexOf("error") === 0 && !(root.cur && root.cur.pointersPut.length) }
+    function noteBad() {
+        var n = root.curListed ? root.curListed.note : null
+        if (n && n.state === "retrying" && n.attempts >= 3) return true
+        var d = root.st.delivery || ""; return d.indexOf("error") === 0 && !(root.cur && root.cur.pointersPut.length)
+    }
     // devices that can read a members repo: added by hand + those of paid-up memberships
     function deviceCount(r) {
         if (!r) return 0

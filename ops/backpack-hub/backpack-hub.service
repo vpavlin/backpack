@@ -1,0 +1,15 @@
+[Unit]
+Description=Backpack hub: backpack_core headless under logosctl; announces every repo in ~/.backpack over Logos Delivery until Store holds it
+After=network-online.target
+
+[Service]
+EnvironmentFile=/home/vpavlin/backpack-hub/env
+WorkingDirectory=/home/vpavlin/port-0.3/logosctl
+ExecStart=/home/vpavlin/port-0.3/logosctl/logosctl daemon start
+ExecStartPost=/home/vpavlin/backpack-hub/load.sh
+ExecStop=/home/vpavlin/backpack-hub/ctl.sh daemon stop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
