@@ -13,6 +13,7 @@ import * as R from "./src/repo";
 import * as storage from "./src/storage";
 import * as delivery from "./src/delivery";
 import * as settingsStore from "./src/settings";
+import * as LoamSetup from "./src/loam-setup";
 
 const C = { bg: "#14161a", card: "#1d2026", line: "#2a2e36", text: "#e8e6e3", dim: "#9aa0a8", accent: "#e0a458", ok: "#7fbf7f", err: "#e07a6a" };
 const mb = (n: number) => `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
@@ -182,6 +183,40 @@ function Main() {
   refreshRef.current = refreshAll;
 
   // first load + backpack:// links (opened from a message, a QR scan, a browser)
+  // Loam (ADR 0016): without it Backpack hears about updates only through web addresses (off by default).
+  // Install it from your repos, else from the built-in source; if that list can't be fetched, offer its
+  // web address once. The APK is checked like any other (signed index sha256, pinned Loam signer).
+  const [loamMissing, setLoamMissing] = useState(false);
+  const checkLoam = useCallback(() => { LoamSetup.loamInstalled().then((ok) => setLoamMissing(!ok)).catch(() => {}); }, []);
+  const installLoam = useCallback(async (web = false) => {
+    setBusy(web ? "Finding Loam (web address)…" : "Finding Loam…");
+    try {
+      const { repo, app } = await LoamSetup.findLoam(await R.loadRepos(), (s) => setBusy(`Loam: ${s}…`), web);
+      const v = app.versions[0];
+      let stage = "starting";
+      const res = await R.install(repo, app, v, (s) => { stage = s; setBusy(`Loam ${v.versionName}: ${s}…`); },
+        (p) => { if (p.total > 0) setBusy(`Loam ${v.versionName}: ${stage} ${Math.min(100, Math.round(p.bytes * 100 / p.total))}% of ${(p.total / 1e6).toFixed(0)} MB…`); });
+      setBusy(null);
+      if (res === "needs-permission") Alert.alert("Allow installs", `Loam is downloaded and checked. Android needs your permission for Backpack to install apps: turn on "Allow from this source", then come back and tap Install Loam again in Settings (it won't download again).`,
+        [{ text: "Later", style: "cancel" }, { text: "Open settings", onPress: () => R.installer.openSettings() }]);
+    } catch (e: any) {
+      setBusy(null);
+      const msg = String(e?.message ?? e);
+      if (!web) Alert.alert("Couldn't get Loam", `${msg}\n\nBackpack can ask the built-in repository's web address for its newest list instead, this once. Only that signed note comes from the web; Loam itself still comes from Logos Storage and is checked against Loam's key.`,
+        [{ text: "Not now", style: "cancel" }, { text: "Use the web address", onPress: () => installLoam(true) }]);
+      else Alert.alert("Couldn't get Loam", msg);
+    }
+    finally { checkLoam(); }
+  }, [checkLoam]);
+  const askLoam = useCallback(async () => {
+    if (!(await LoamSetup.shouldAsk())) return;
+    await LoamSetup.markAsked();
+    setLoamMissing(true);
+    Alert.alert("Install Loam too?",
+      "Loam is the Logos app that keeps your phone on the Logos network for all your Logos apps.\n\nWith it, Backpack hears about new app versions over Logos Delivery, even ones published while it was closed. Without it, Backpack only finds updates through repositories' web addresses, which are off unless you turn them on in Settings.\n\nBackpack downloads Loam over Logos Storage and checks it against Loam's signing key.",
+      [{ text: "Not now", style: "cancel" }, { text: "Install Loam", onPress: () => installLoam(false) }]);
+  }, [installLoam]);
+
   useEffect(() => {
     storage.lastCrash().then((c) => c && Alert.alert("Backpack stopped last time", `It crashed inside the Logos Storage call: ${c}. Please tell the developer.`));
     // on start: show what we have, then ask each repo's pointers for anything newer (ADR 0003)
@@ -192,12 +227,15 @@ function Main() {
       if (rs.length) listen(rs);   // start Delivery first: its Store pull runs while the web sources answer
       if (u && u.startsWith("backpack://repo")) confirmAdd(u);
       else if (rs.length) refreshAll();
+      checkLoam();
+      setTimeout(() => { askLoam().catch(() => {}); }, 1500);   // after the first screen is up
     });
     const sub = Linking.addEventListener("url", ({ url }) => { if (url.startsWith("backpack://repo")) confirmAdd(url); });
     // back in the foreground: rescan (an install or uninstall may have finished), and look for
     // updates again if the last check is more than 15 minutes old
     const st = AppState.addEventListener("change", (s) => {
       if (s !== "active") return;
+      checkLoam();   // back from installing Loam (or from removing it)
       // an install whose Android dialog was dismissed sends no answer: offer to show it again (Confirm)
       setTimeout(async () => {
         const waiting = await R.installer.awaitingInstalls();
@@ -209,7 +247,7 @@ function Main() {
       else R.loadRepos().then(scanInstalled);
     });
     return () => { sub.remove(); st.remove(); };
-  }, [add, refreshAll, scanInstalled, loadIcons]);
+  }, [add, refreshAll, scanInstalled, loadIcons, checkLoam, askLoam]);
 
   // One install per app at a time (an automatic update, a refresh triggered by a new note and a tap could
   // each start one: the first to finish deleted the shared file and Android asked several times). A second
@@ -370,7 +408,7 @@ function Main() {
       </ScrollView>
       {showSettings && (
         <Modal visible animationType="slide" onRequestClose={() => setShowSettings(false)}>
-          <SettingsScreen prefs={prefs} onClose={() => setShowSettings(false)}
+          <SettingsScreen prefs={prefs} onClose={() => setShowSettings(false)} loamMissing={loamMissing} onInstallLoam={() => { setShowSettings(false); installLoam(false); }}
             onChange={async (patch) => { const next = await settingsStore.set(patch); setPrefs(next); if (patch.webPointers) refreshAll(); }} />
         </Modal>
       )}
@@ -386,7 +424,7 @@ function Main() {
   );
 }
 
-function SettingsScreen({ prefs, onChange, onClose }: { prefs: settingsStore.Settings; onChange: (p: Partial<settingsStore.Settings>) => void; onClose: () => void }) {
+function SettingsScreen({ prefs, onChange, onClose, loamMissing, onInstallLoam }: { prefs: settingsStore.Settings; onChange: (p: Partial<settingsStore.Settings>) => void; onClose: () => void; loamMissing: boolean; onInstallLoam: () => void }) {
   const Row = ({ title, body, value, onValue }: { title: string; body: string; value: boolean; onValue: (v: boolean) => void }) => (
     <View style={[s.card, { flexDirection: "row", alignItems: "center" }]}>
       <View style={{ flex: 1, marginRight: 12 }}>
@@ -403,6 +441,13 @@ function SettingsScreen({ prefs, onChange, onClose }: { prefs: settingsStore.Set
         <Text style={[s.title, { marginLeft: 12, fontSize: 20 }]}>Settings</Text>
       </View>
       <ScrollView contentContainerStyle={{ padding: 12 }}>
+        {loamMissing && (
+          <View style={s.card}>
+            <Text style={s.appName}>Loam isn't installed</Text>
+            <Text style={[s.hint, { marginTop: 4 }]}>Without Loam, Backpack only learns about new app versions through repositories' web addresses (the switch below). Loam brings Logos Delivery for that, and shares one network connection and download cache with your other Logos apps.</Text>
+            <Pressable style={[s.btn, { marginTop: 10 }]} onPress={onInstallLoam}><Text style={s.btnT}>Install Loam</Text></Pressable>
+          </View>
+        )}
         <Row title="Install app updates automatically" value={prefs.autoInstall} onValue={(v) => onChange({ autoInstall: v })}
           body="Repositories are always checked when Backpack opens. With this on, updates for apps you have installed are then downloaded and installed too (Android may still ask you to confirm). Off: you tap Update yourself." />
         <MemberCode />

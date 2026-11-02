@@ -85,7 +85,7 @@ export async function saveRepos(r: Repo[]) { await AsyncStorage.setItem(KEY, JSO
  * arrival) and each HTTPS URL — and return the valid pointer with the highest seq, which source gave
  * it, and what every source said (shown in the app, so it's clear where an update came from).
  */
-export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null; via?: string; sources: Source[] }> {
+export async function newestPointer(repo: Repo, opts?: { web?: boolean }): Promise<{ best: Pointer | null; via?: string; sources: Source[] }> {
   const sources: Source[] = [];
   const cands: { p: Pointer; name: string }[] = [];
   delivery.know(repo.key, repo.readKey);
@@ -94,7 +94,8 @@ export async function newestPointer(repo: Repo): Promise<{ best: Pointer | null;
   if (d) { const name = `Delivery (${delivery.arrivedVia(repo.key) ?? "live"})`; sources.push({ name, seq: d.seq }); cands.push({ p: d, name }); }
   else sources.push({ name: "Delivery", error: ds.state === "on" ? `nothing yet${ds.pull ? ` (${ds.pull.replace(/^store: /, "")})` : ""}` : ds.state === "unavailable" ? "Loam not available" : "starting" });
   const urls = uniq([...(repo.pointers ?? []), ...(repo.index?.pointers ?? [])].map(safePointerUrl).filter((u): u is string => !!u)).slice(0, LIMITS.pointers);
-  if (!settings.get().webPointers) { if (urls.length) sources.push({ name: "web", error: "off in Settings" }); }
+  // opts.web: the user asked for the web this once (Loam setup)
+  if (!settings.get().webPointers && !opts?.web) { if (urls.length) sources.push({ name: "web", error: "off in Settings" }); }
   else await Promise.all(urls.map(async (url) => {
     const name = (() => { try { return new URL(url).host; } catch { return url; } })();
     try {
@@ -138,10 +139,10 @@ function period(ms?: number): string {
   return d === 1 ? "day" : d % 7 === 0 ? (d === 7 ? "week" : `${d / 7} weeks`) : `${d} days`;
 }
 
-export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<Repo> {
+export async function refresh(repo: Repo, onStage?: (s: string) => void, onProgress?: (p: storage.Progress) => void, opts?: { web?: boolean }): Promise<Repo> {
   const have = repo.seq ?? 0;
   onStage?.("checking for updates");
-  const { best: ptr, via, sources } = await newestPointer(repo);
+  const { best: ptr, via, sources } = await newestPointer(repo, opts);
   let cid = repo.indexCid, expectSeq: number | null = null;
   if (ptr && ptr.seq > have) { cid = ptr.index; expectSeq = ptr.seq; }
   else if (repo.index && cid === repo.loadedCid) {
