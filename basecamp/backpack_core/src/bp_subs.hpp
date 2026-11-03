@@ -2,7 +2,9 @@
 // bp_subs.hpp - the subscriber side: repos this computer follows (not publishes), and paying for a
 // membership of a paid members repo (ADR 0013 + backpack-access on LEZ). The membership's devices are
 // the user's phones: their member codes go into it, and the publisher's next publish lets them in.
-// Nothing here is a secret: the link of a members repo carries no key, and memberships are public on chain.
+// The link of a members repo carries no key, and memberships are public on chain. A PRIVATE repo's link
+// carries its read key (x=): it is kept in the subscription (the file is 0600) to find and open the repo's
+// encrypted update notes, index and icons. It is a secret: never logged, never shown.
 // State: <data dir>/subscriptions.json  {me:{wallet, account}, subs:{<repo key>:{...}}}
 #include "bp_http.hpp"
 #include "bp_lez.hpp"
@@ -20,7 +22,7 @@ inline bool knownLezProgram(const std::string& hex) {
     return false;
 }
 
-struct RepoLink { std::string key, name, index; std::vector<std::string> pointers; bool members = false; };
+struct RepoLink { std::string key, name, index, readKey; std::vector<std::string> pointers; bool members = false; };
 inline RepoLink parseRepoLink(const std::string& link) {
     std::string t = link; while (!t.empty() && isspace((unsigned char)t.back())) t.pop_back(); while (!t.empty() && isspace((unsigned char)t.front())) t.erase(0, 1);
     if (t.rfind("backpack://repo?", 0) != 0) throw Err("not a Backpack repo link (backpack://repo?...)");
@@ -34,11 +36,13 @@ inline RepoLink parseRepoLink(const std::string& link) {
             std::string k = kv.substr(0, eq), v = dec(kv.substr(eq + 1));
             if (k == "k") r.key = v; else if (k == "n") r.name = v.substr(0, 100); else if (k == "i") r.index = v;
             else if (k == "m") r.members = v == "1";
+            else if (k == "x") r.readKey = v;
             else if (k == "u" && v.rfind("https://", 0) == 0 && r.pointers.size() < 8) r.pointers.push_back(v);
         }
         if (e == std::string::npos) break; p = e + 1;
     }
     if (r.key.size() != 43 || unb64url(r.key).size() != 32) throw Err("the link's publisher key is malformed");
+    if (!r.readKey.empty() && (r.readKey.size() != 43 || unb64url(r.readKey).size() != 32)) throw Err("the link's read key is malformed");
     return r;
 }
 
@@ -84,6 +88,7 @@ struct Subs {
         RepoLink r = parseRepoLink(link);
         json& x = s["subs"][r.key];
         x["key"] = r.key; x["link"] = link; x["members"] = r.members; x["pointers"] = r.pointers;
+        if (!r.readKey.empty() && !r.members) x["readKey"] = r.readKey;   // a private repo (ADR 0009)
         if (!x.contains("name") || !r.name.empty()) x["name"] = r.name.empty() ? "a Backpack repo" : r.name;
         x["followed"] = x.value("followed", nowIso());
         save();
@@ -95,14 +100,16 @@ struct Subs {
     json refresh(const std::string& key) {
         json& x = sub(key);
         json best; int64_t bestSeq = -1; std::string lastErr;
+        const std::string rk = x.value("readKey", std::string());
         auto consider = [&](const std::string& text) {
-            json b = open(json::parse(text), key, "pointer");
+            json b = open(json::parse(text), key, "pointer", rk);
             if (b.value("seq", 0) > bestSeq) { bestSeq = b.value("seq", 0); best = b; }
         };
         // Delivery first (ADR 0007): the publisher sends every note there; web addresses are optional
         if (fromDelivery) {
             std::vector<std::string> notes;
-            try { notes = fromDelivery(key); } catch (std::exception& e) { lastErr = std::string("Delivery: ") + e.what(); }
+            // a private repo's notes go to a topic named by its read key, not by the public key
+            try { notes = fromDelivery(rk.empty() ? key : topicId(rk)); } catch (std::exception& e) { lastErr = std::string("Delivery: ") + e.what(); }
             for (auto& n : notes) { try { consider(n); } catch (...) {} }   // the topic is public: skip what doesn't open
             if (notes.empty() && lastErr.empty()) lastErr = "nothing on Delivery yet";
         }

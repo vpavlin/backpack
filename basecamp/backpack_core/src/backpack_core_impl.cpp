@@ -855,8 +855,19 @@ void BackpackCoreImpl::mirrorListDone(const std::string& payload) {
         std::string dir; { std::lock_guard<std::recursive_mutex> lk(m_mtx); dir = m_dataDir; }
         std::string part = dir + "/icons/" + cid + ".part";
         std::error_code ec;
-        if (p.value("success", false) && bp::fs::file_size(part, ec) > 0 && !ec) bp::fs::rename(part, dir + "/icons/" + cid, ec);
-        else bp::fs::remove(part, ec);
+        if (p.value("success", false) && bp::fs::file_size(part, ec) > 0 && !ec) {
+            auto k = m_iconKeys.find(cid);
+            if (k == m_iconKeys.end()) bp::fs::rename(part, dir + "/icons/" + cid, ec);
+            else {   // a private repo's icon: decrypt (and authenticate) it; a bad one is dropped
+                try {
+                    std::string raw = bp::readFile(part);
+                    if (raw.size() > (2u << 20)) throw bp::Err("icon too large");
+                    bp::Bytes plain = bp::decryptBuffer(bp::Bytes(raw.begin(), raw.end()), k->second);
+                    bp::writeFileAtomic(dir + "/icons/" + cid, std::string(plain.begin(), plain.end()), 0600);
+                } catch (std::exception& e) { fprintf(stderr, "Backpack: icon %s: %s\n", cid.c_str(), e.what()); }
+                bp::fs::remove(part, ec);
+            }
+        } else bp::fs::remove(part, ec);
         return;
     }
     if (!m_mirrorListing.count(cid)) return;   // someone else's download
@@ -896,9 +907,11 @@ void BackpackCoreImpl::subIndexDone(const std::string& cid, const std::string& k
         std::string raw = bp::readFile(tmp);
         if (raw.size() > (1u << 20)) throw bp::Err("index over 1 MB");
         json env = json::parse(raw);
-        if (env.contains("enc")) out["encrypted"] = true;
+        std::string rk;   // a private repo's read key, from its link (bp_subs.hpp)
+        try { rk = bp::Subs::load(dir).s["subs"][key].value("readKey", std::string()); } catch (...) {}
+        if (env.contains("enc") && rk.empty()) out["encrypted"] = true;
         else {
-            json b = bp::open(env, key, "index");   // throws unless signed by the repo key
+            json b = bp::open(env, key, "index", rk);   // throws unless signed by the repo key (and, private, opened with the read key)
             out["seq"] = b.value("seq", 0); out["name"] = b.value("name", std::string());
             json apps = json::array();
             for (auto& a : b.value("apps", json::array())) {
@@ -910,8 +923,11 @@ void BackpackCoreImpl::subIndexDone(const std::string& cid, const std::string& k
                             {"size", v.value("size", 0LL)}, {"added", v.value("added", std::string())}, {"cid", v.value("cid", std::string())}};
                 std::string icon = a.contains("icon") && a["icon"].is_string() ? a["icon"].get<std::string>() : std::string();
                 if (!icon.empty() && !isCid(icon)) icon.clear();
-                apps.push_back(json{{"id", a.value("id", std::string())}, {"label", a.value("label", a.value("id", std::string()))},
-                                    {"summary", a.value("summary", std::string())}, {"icon", icon}, {"versions", (int)vs.size()}, {"latest", latest}});
+                json app{{"id", a.value("id", std::string())}, {"label", a.value("label", a.value("id", std::string()))},
+                         {"summary", a.value("summary", std::string())}, {"icon", icon}, {"versions", (int)vs.size()}, {"latest", latest}};
+                // a private repo's icon is encrypted under its own key (ADR 0009): decrypted once downloaded
+                if (!icon.empty() && a.contains("iconKey") && a["iconKey"].is_string()) { app["iconKey"] = a["iconKey"]; m_iconKeys[icon] = a["iconKey"]; }
+                apps.push_back(app);
                 if (!icon.empty()) icons.push_back(icon);
             }
             out["apps"] = apps;
@@ -977,6 +993,18 @@ void BackpackCoreImpl::mirrorTickBody() {
     std::map<std::string, std::set<std::string>> want;   // cid -> repo keys
     std::set<std::string> listsInUse;
     json perRepo = json::object();
+    // dial each followed repo's own nodes (every 10 minutes): fetching across nodes needs a direct connection,
+    // for the app list too, and with hosting off. Before the index download below, not after it.
+    for (auto& [key, x] : subs.items()) {
+        if (!x.contains("hold")) continue;
+        for (auto& n : x["hold"].value("nodes", json::array())) {
+            std::string pid = n.value("peerId", std::string());
+            if (pid.empty() || (m_mirrorDialed.count(pid) && now - m_mirrorDialed[pid] < 10 * 60000)) continue;
+            m_mirrorDialed[pid] = now;
+            std::vector<std::string> addrs; for (auto& a : n.value("addrs", json::array())) if (a.is_string()) addrs.push_back(a);
+            try { modules().storage_module.connectAsyncResult(pid, addrs, [](logos::AsyncResult<StdLogosResult>) {}, 60000); } catch (...) {}
+        }
+    }
     // every followed repo's app list (shown on its page): download its signed index when it changed
     for (auto& [key, x] : subs.items()) {
         if (!x.contains("hold")) continue;
@@ -986,7 +1014,10 @@ void BackpackCoreImpl::mirrorTickBody() {
         try { known = json::parse(bp::readFile(dir + "/sub-apps/" + key + ".json")); have = known.value("indexCid", std::string()); } catch (...) {}
         if (have == I) {   // list unchanged: just make sure its icons are all here
             std::vector<std::string> icons;
-            for (auto& a : known.value("apps", json::array())) if (a.is_object() && a.contains("icon") && a["icon"].is_string() && !a["icon"].get<std::string>().empty()) icons.push_back(a["icon"]);
+            for (auto& a : known.value("apps", json::array())) if (a.is_object() && a.contains("icon") && a["icon"].is_string() && !a["icon"].get<std::string>().empty()) {
+                icons.push_back(a["icon"]);
+                if (a.contains("iconKey") && a["iconKey"].is_string()) m_iconKeys[a["icon"].get<std::string>()] = a["iconKey"];
+            }
             fetchSubIcons(dir, icons);
             continue;
         }
@@ -1000,14 +1031,7 @@ void BackpackCoreImpl::mirrorTickBody() {
     for (auto& [key, x] : subs.items()) {
         if (x.value("mirrorOff", false) || !x.contains("hold")) continue;
         const json& h = x["hold"];
-        // dial the repo's own nodes first (every 10 minutes): fetching across nodes needs a direct connection
-        for (auto& n : h.value("nodes", json::array())) {
-            std::string pid = n.value("peerId", std::string());
-            if (pid.empty() || (m_mirrorDialed.count(pid) && now - m_mirrorDialed[pid] < 10 * 60000)) continue;
-            m_mirrorDialed[pid] = now;
-            std::vector<std::string> addrs; for (auto& a : n.value("addrs", json::array())) if (a.is_string()) addrs.push_back(a);
-            try { modules().storage_module.connectAsyncResult(pid, addrs, [](logos::AsyncResult<StdLogosResult>) {}, 60000); } catch (...) {}
-        }
+        // (the repo's own nodes were dialled above, for every followed repo)
         for (const char* f : {"index", "keys", "mirror"}) if (h.contains(f) && h[f].is_string() && isCid(h[f])) want[h[f]].insert(key);
         std::string L = h.value("mirror", std::string());
         if (L.empty() || !isCid(L)) continue;

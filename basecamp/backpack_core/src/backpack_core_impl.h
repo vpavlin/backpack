@@ -145,6 +145,7 @@ private:
     // a followed repo's signed index being downloaded (index CID -> repo key, started ms), and icons (CID -> started)
     std::map<std::string, std::pair<std::string, long long>> m_indexListing;
     std::map<std::string, long long> m_iconListing;
+    std::map<std::string, std::string> m_iconKeys;    // icon CID -> file key (a private repo's encrypted icons)
     void autoCheckSubs();   // every followed repo, quietly (no job), skipping busy ones
     bool m_autoChecking = false;
     void fetchSubIcons(const std::string& dir, const std::vector<std::string>& icons);
