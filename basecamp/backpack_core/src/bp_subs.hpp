@@ -58,6 +58,11 @@ struct Subs {
         if (!x.s.is_object()) x.s = json::object();
         if (!x.s.contains("subs") || !x.s["subs"].is_object()) x.s["subs"] = json::object();
         if (!x.s.contains("me") || !x.s["me"].is_object()) x.s["me"] = json::object();
+        // a private repo followed before 0.6.3 kept its link (with x=) but not the read key: take it from there
+        for (auto& [k, sub] : x.s["subs"].items()) {
+            if (!sub.is_object() || sub.contains("readKey") || sub.value("members", false) || !sub.contains("link") || !sub["link"].is_string()) continue;
+            try { RepoLink r = parseRepoLink(sub["link"].get<std::string>()); if (!r.readKey.empty() && r.key == k) sub["readKey"] = r.readKey; } catch (...) {}
+        }
         return x;
     }
     // onlyKey: save just that repo's entry over what is on disk now (a background check must not overwrite
