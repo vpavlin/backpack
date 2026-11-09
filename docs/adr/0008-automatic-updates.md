@@ -9,7 +9,7 @@
   for installed apps**, one at a time, without a tap.
 - **An update is offered only when the new version is signed by a key the installed app already
   has.** Android would refuse anything else, and a repo that lists a package under a different key
-  is either a fork or a forgery. Across repos, the highest `versionCode` with a matching key wins.
+  is either a fork or a forgery. Across repos, the highest `versionCode` with a matching key wins. *(Superseded by [ADR 0017](0017-one-source-per-app.md): updates come only from the app's source repo.)*
 - **Android confirms each install**, except for apps Backpack itself installed: on Android 12+ those
   update without a prompt (`setRequireUserAction(USER_ACTION_NOT_REQUIRED)`).
 - **Each app has a detail screen**: summary, description, licence, source link, minimum Android,

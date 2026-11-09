@@ -14,3 +14,4 @@
 - [0011](0011-basecamp-app.md): Backpack for Basecamp — backpack_core + backpack_ui, publisher and member roles (proposed).
 - [0012](0012-keycard.md): Keycard for Backpack's keys — repo key on Keycard (secp256k1), APK keys locked by a Keycard tap (proposed, not scheduled).
 - [0014](0014-paid-repos-decisions-2026-10.md): paid repos — the decisions of October 2026 (Basecamp-only flows, monthly terms, joins publish, notes over Delivery, no copy protection, a new key per publish) and the ideas left for later.
+- [0017](0017-one-source-per-app.md): one source repository per installed app — installs and updates only from the repo the user chose; switching needs a confirmation.

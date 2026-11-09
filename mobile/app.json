@@ -3,7 +3,7 @@
     "name": "Backpack",
     "slug": "backpack",
     "scheme": "backpack",
-    "version": "0.2.20",
+    "version": "0.2.21",
     "platforms": [
       "android"
     ],
@@ -12,7 +12,7 @@
     "backgroundColor": "#14161a",
     "android": {
       "package": "xyz.vpavlin.backpack",
-      "versionCode": 26,
+      "versionCode": 27,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#14161a"

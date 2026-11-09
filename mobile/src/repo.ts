@@ -14,6 +14,10 @@ import * as delivery from "./delivery";
 import * as settings from "./settings";
 import { isReadKey } from "./crypt";
 import * as member from "./member";
+import { SourceMismatch, mayInstall, sourceState, updateSource } from "./source";
+import type { Sources, SourceState } from "./source";
+export { SourceMismatch, sourceState };
+export type { Sources, SourceState };
 import { LIMITS, isCid, isKey, peer as checkPeer, safePointerUrl, validateIndex, validatePointer } from "./schema";
 import type { App, Index, Peer, Pointer, Version } from "./schema";
 export type { App, Index, Pointer, Version };
@@ -256,19 +260,36 @@ export async function skipVersion(pkg: string, versionCode: number) {
 }
 async function skipped(): Promise<Record<string, number>> { try { return JSON.parse((await AsyncStorage.getItem(SKIP)) ?? "{}"); } catch { return {}; } }
 
+// Where each installed app installs and updates from (ADR 0017): package → repo key.
+const SOURCES = "backpack.sources.v1";
+export async function loadSources(): Promise<Sources> {
+  try { const m = JSON.parse((await AsyncStorage.getItem(SOURCES)) ?? "{}"); return m && typeof m === "object" ? m : {}; } catch { return {}; }
+}
+/** The user chose `repoKey` for `pkg` (by installing from it, or by confirming a switch). */
+export async function setSource(pkg: string, repoKey: string): Promise<Sources> {
+  const m = await loadSources(); m[pkg] = repoKey;
+  await AsyncStorage.setItem(SOURCES, JSON.stringify(m));
+  return m;
+}
+/** Keys of the repos that list `pkg`. */
+export function listedBy(repos: Repo[], pkg: string): string[] {
+  return repos.filter((r) => r.index?.apps.some((a) => a.id === pkg)).map((r) => r.key);
+}
+
 /**
- * Updates available for installed apps: across all repos, the newest version of each installed
- * package that is signed by a key the installed app already has (anything else Android would refuse,
- * so it is not offered as an update). Same package in several repos: the highest versionCode wins.
+ * Updates available for installed apps: for each installed package, the newest version in ITS SOURCE
+ * repo (ADR 0017: the one the user chose, or the only repo that lists it), signed by a key the
+ * installed app already has (anything else Android would refuse). An app several repos list and the
+ * user hasn't chosen for gets no automatic update; another repo's higher version never wins.
  */
 export async function pendingUpdates(repos: Repo[], installed: Record<string, number>): Promise<Update[]> {
   const best = new Map<string, Update>();
   const skip = await skipped();
+  const sources = await loadSources();
   for (const repo of repos) for (const app of repo.index?.apps ?? []) {
     const have = installed[app.id] ?? -1, v = app.versions[0];
     if (have < 0 || !v || v.versionCode <= have || !v.signer || (skip[app.id] ?? 0) >= v.versionCode) continue;
-    const prev = best.get(app.id);
-    if (prev && prev.v.versionCode >= v.versionCode) continue;
+    if (updateSource(app.id, listedBy(repos, app.id), sources) !== repo.key) continue;
     if (!(await installer.installedSigners(app.id)).includes(v.signer)) continue;
     best.set(app.id, { repo, app, v, from: have });
   }
@@ -290,10 +311,19 @@ export function publishersOf(repos: Repo[], pkg: string): { repo: Repo; signer?:
  * certificate is the one the index pins; and, if the app is installed, the installed app has that
  * signer too (Android would refuse the update anyway, but only after the user said yes).
  */
-export async function install(repo: Repo, app: App, v: Version, onStage: (s: string) => void, onProgress?: (p: storage.Progress) => void): Promise<string> {
+export async function install(repo: Repo, app: App, v: Version, onStage: (s: string) => void, onProgress?: (p: storage.Progress) => void,
+  opts?: { confirmedSwitch?: boolean }): Promise<string> {
   // app.id and versionCode passed the schema (package-name pattern, integer), so this stays in apks/ (BP-7)
   const path = `${await storage.filesDir()}/apks/${app.id}_${v.versionCode}.apk`;
   if (!/^[0-9a-f]{64}$/.test(v.signer ?? "")) throw new Error("this version doesn't pin a signing key: refusing to install it");   // BP-6
+  // ADR 0017: an installed app comes only from its source repo, unless the user confirmed the switch.
+  // Checked here, before any download, so no caller (automatic update, a tap, a link) can skip it.
+  const repos = await loadRepos(), sources = await loadSources();
+  const isInstalled = JSON.parse(await Installer.installedSigners(app.id)).length > 0;
+  const listed = listedBy(repos, app.id);
+  if (!listed.includes(repo.key)) listed.push(repo.key);
+  if (!mayInstall(app.id, repo.key, isInstalled, listed, sources, opts?.confirmedSwitch))
+    throw new SourceMismatch(app.id, repo.key, sourceState(app.id, listed, sources));
   const have = await storage.fileSize(path);
   if (have !== v.size) {
     // private repo (ADR 0009): download the ciphertext next to it, then decrypt natively (chunked, flat memory)
@@ -326,6 +356,6 @@ export async function install(repo: Repo, app: App, v: Version, onStage: (s: str
   if (!(await Installer.canInstall())) return "needs-permission";
   onStage("installing");
   const res: string = await Installer.install(path, app.id);
-  if (res === "installed") await Installer.deleteFile(path);
+  if (res === "installed") { await Installer.deleteFile(path); await setSource(app.id, repo.key); }
   return res;
 }

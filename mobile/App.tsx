@@ -62,6 +62,7 @@ function Main() {
   };
   const [link, setLink] = useState("");
   const [installed, setInstalled] = useState<Record<string, number>>({});
+  const [sources, setSources] = useState<R.Sources>({});   // package → repo it updates from (ADR 0017)
   const [stage, setStage] = useState<Record<string, string>>({}); // app id → install stage
   const [prog, setProg] = useState<Record<string, storage.Progress>>({}); // app id → download progress
   const [icons, setIcons] = useState<Record<string, string>>({});
@@ -106,6 +107,7 @@ function Main() {
     if (!R.installer.available()) return out;
     for (const r of rs) for (const a of r.index?.apps ?? []) out[a.id] = await R.installer.installedVersion(a.id);
     setInstalled(out);
+    setSources(await R.loadSources());
     return out;
   }, []);
 
@@ -253,24 +255,31 @@ function Main() {
   // each start one: the first to finish deleted the shared file and Android asked several times). A second
   // request for the same app joins the running one.
   const running = useRef(new Map<string, Promise<string>>());
-  const install = (repo: R.Repo, app: R.App, quiet = false): Promise<string> => {
+  const install = (repo: R.Repo, app: R.App, quiet = false, confirmedSwitch = false): Promise<string> => {
     const cur = running.current.get(app.id);
     if (cur) return cur;
-    const p = installOnce(repo, app, quiet).finally(() => running.current.delete(app.id));
+    const p = installOnce(repo, app, quiet, confirmedSwitch).finally(() => running.current.delete(app.id));
     running.current.set(app.id, p);
     return p;
   };
-  const installOnce = async (repo: R.Repo, app: R.App, quiet = false): Promise<string> => {
+  const installOnce = async (repo: R.Repo, app: R.App, quiet = false, confirmedSwitch = false): Promise<string> => {
     const v = app.versions[0];
     const set = (s: string | null) => setStage((m) => { const n = { ...m }; if (s) n[app.id] = s; else delete n[app.id]; return n; });
     let res = "failed";
     try {
       set("starting");
-      res = await R.install(repo, app, v, set, (p) => setProg((m) => ({ ...m, [app.id]: p })));
+      res = await R.install(repo, app, v, set, (p) => setProg((m) => ({ ...m, [app.id]: p })), { confirmedSwitch });
       if (res === "cancelled" && !quiet) Alert.alert("Not installed", "The install was cancelled.");
       if (res === "needs-permission") Alert.alert("Allow installs", `${app.label} is downloaded and checked. Android needs your permission for Backpack to install apps: turn on "Allow from this source", then come back and tap Install again (it won't download again).`,
         [{ text: "Later", style: "cancel" }, { text: "Open settings", onPress: () => R.installer.openSettings() }]);
     } catch (e: any) {
+      // ADR 0017: the app updates from another repo (or several list it and none is chosen). Only the
+      // user can move it, here, after seeing both repos; an automatic update never does.
+      if (e instanceof R.SourceMismatch) {
+        if (quiet) storage.diag(`auto-update ${app.id}: ${e.message}`);
+        else confirmSwitch(repo, app, () => { install(repo, app, false, true); });
+        return "source-mismatch";
+      }
       // automatic updates never pop alerts (audit BP-19): log it; the user sees it when they tap Update
       if (quiet) storage.diag(`auto-update ${app.id}: ${e?.message ?? e}`);
       else Alert.alert(`Couldn't install ${app.label}`, String(e?.message ?? e));
@@ -278,6 +287,22 @@ function Main() {
     finally { set(null); setProg((m) => { const n = { ...m }; delete n[app.id]; return n; }); scanInstalled(await R.loadRepos()); }
     return res;
   };
+
+  // ADR 0017: moving an installed app to another repo. Shows where it updates from now and which repo
+  // it would come from; on yes, `then` runs (an install with the switch confirmed, or just the choice).
+  const confirmSwitch = (repo: R.Repo, app: R.App, then: () => void) => {
+    const listed = R.listedBy(repos, app.id), st = R.sourceState(app.id, listed, sources);
+    const name = (k: string) => { const r = repos.find((x) => x.key === k); return r ? `"${r.name}" (key ${keyShort(r.key)})` : `a removed repository (key ${keyShort(k)})`; };
+    const now = st.kind === "chosen" || st.kind === "gone" || st.kind === "only" ? `It updates from ${name(st.repo)}${st.kind === "gone" ? ", which no longer lists it" : ""}.`
+      : st.kind === "ambiguous" ? `${st.repos.length} repositories list it: ${st.repos.map(name).join(", ")}. You haven't chosen one yet.` : "";
+    Alert.alert(`Get ${app.label} from "${repo.name}"?`,
+      `${now}\n\nFrom now on ${app.label} would install and update only from ${name(repo.key)}. Switch only if you trust this publisher: a repository can ship any build signed with the app's key.`,
+      [{ text: "Cancel", style: "cancel" }, { text: "Switch", style: "destructive", onPress: then }]);
+  };
+  const chooseSource = (repo: R.Repo, app: R.App) => confirmSwitch(repo, app, async () => {
+    setSources(await R.setSource(app.id, repo.key));
+    autoUpdate(await R.loadRepos(), installed);   // a newer version there is installed as usual
+  });
 
   // Cancel a running download (the stages before "checking": nothing is installed yet).
   const cancelDownload = (app: R.App) => {
@@ -304,6 +329,22 @@ function Main() {
     } finally { updatingRef.current = false; setUpdating(null); }
   };
 
+  // ADR 0017 helpers for rendering
+  const isSource = (r: R.Repo, a: R.App) => {
+    const st = R.sourceState(a.id, R.listedBy(repos, a.id), sources);
+    return (st.kind === "chosen" || st.kind === "only") && st.repo === r.key;
+  };
+  const sourceLine = (a: R.App): { text: string; warn: boolean } => {
+    const st = R.sourceState(a.id, R.listedBy(repos, a.id), sources);
+    const nm = (k: string) => repos.find((x) => x.key === k)?.name ?? "a removed repository";
+    if (st.kind === "chosen") return { text: `updates from "${nm(st.repo)}"`, warn: false };
+    if (st.kind === "gone") return { text: `its repository "${nm(st.repo)}" no longer lists it`, warn: true };
+    if (st.kind === "ambiguous") return { text: `several repositories list it: choose one`, warn: true };
+    return { text: "", warn: false };
+  };
+  const ambiguousCount = Object.keys(installed).filter((pkg) => (installed[pkg] ?? -1) >= 0
+    && R.sourceState(pkg, R.listedBy(repos, pkg), sources).kind === "ambiguous").length;
+
   const remove = (r: R.Repo) => Alert.alert(`Remove "${r.name}"?`, "Apps you installed from it stay installed.", [
     { text: "Cancel", style: "cancel" },
     { text: "Remove", style: "destructive", onPress: async () => { const rs = repos.filter((x) => x.key !== r.key); await R.saveRepos(rs); setRepos(rs); delivery.unwatch([r.key]); } },
@@ -317,6 +358,7 @@ function Main() {
         <Pressable onPress={() => setShowDiag((d) => !d)} style={[s.headBtn, { marginRight: 8 }]}><Text style={s.headBtnT}>{showDiag ? "Hide log" : "Log"}</Text></Pressable>
         <Pressable onPress={() => setAdding((a) => !a)} style={s.headBtn}><Text style={s.headBtnT}>{adding ? "Close" : "+ Repo"}</Text></Pressable>
       </View>
+      {ambiguousCount > 0 && <Text style={[s.banner, { color: C.err }]}>{ambiguousCount === 1 ? "1 installed app is" : `${ambiguousCount} installed apps are`} listed by several repositories and won't update until you choose one: open the app and pick where it updates from.</Text>}
       {!storage.available() && <Text style={[s.banner, { color: C.err }]}>Logos Storage isn't in this build — Backpack needs an arm64 phone.</Text>}
       {showDiag && (
         <View style={[s.card, { maxHeight: 320 }]}>
@@ -368,7 +410,7 @@ function Main() {
           <View key={r.key} style={{ marginBottom: 18 }}>
             <Pressable onPress={() => toggleFold(r.key)} onLongPress={() => remove(r)} style={s.repoHead}>
               <Text style={s.repoName}>{folded[r.key] ? "▸ " : "▾ "}{r.name}</Text>
-              <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps${folded[r.key] ? (() => { const n = r.index!.apps.filter((a) => (installed[a.id] ?? -1) >= 0 && (installed[a.id] ?? -1) < (a.versions[0]?.versionCode ?? 0)).length; return n ? ` (${n} update${n > 1 ? "s" : ""})` : ""; })() : ""} · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
+              <Text style={s.repoMeta}>{r.index ? `${r.index.apps.length} apps${folded[r.key] ? (() => { const n = r.index!.apps.filter((a) => (installed[a.id] ?? -1) >= 0 && (installed[a.id] ?? -1) < (a.versions[0]?.versionCode ?? 0) && isSource(r, a)).length; return n ? ` (${n} update${n > 1 ? "s" : ""})` : ""; })() : ""} · #${r.seq ?? 0} · ${new Date(r.index.created).toLocaleDateString()}${r.checkedAt ? ` · checked ${new Date(r.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}` : "not fetched"}</Text>
               <Text style={s.repoKey}>{r.members ? "👥 members · " : r.readKey ? "🔒 private · " : ""}publisher key {keyShort(r.key)}</Text>
               {!!r.sources?.length && (
                 <Text style={s.repoKey}>
@@ -380,13 +422,15 @@ function Main() {
             {r.error && <Text style={[s.hint, { color: C.err }]}>{r.error}</Text>}
             {(folded[r.key] ? [] : r.index?.apps ?? []).map((a) => {
               const v = a.versions[0]; const have = installed[a.id] ?? -1; const st = stage[a.id];
-              const action = have < 0 ? "Install" : have < v.versionCode ? "Update" : "Open";
+              const mine = have < 0 || isSource(r, a);   // ADR 0017: installed apps update only from their source
+              const action = have < 0 ? "Install" : have < v.versionCode && mine ? "Update" : "Open";
               return (
                 <Pressable key={a.id} style={s.app} onPress={() => setDetail({ repo: r, app: a })}>
                   {icons[a.id] ? <Image source={{ uri: icons[a.id] }} style={s.icon} /> : <View style={[s.icon, s.iconPh]}><Text style={{ color: C.dim }}>{a.label.slice(0, 1)}</Text></View>}
                   <View style={{ flex: 1 }}>
                     <Text style={s.appName} numberOfLines={1}>{a.label}</Text>
                     <Text style={s.appMeta} numberOfLines={1}>{v.versionName} · {mb(v.size)}{have >= 0 ? ` · installed ${have === v.versionCode ? "" : `(${have})`}` : ""}</Text>
+                    {!mine && <Text style={[s.appMeta, { color: sourceLine(a).warn ? C.err : C.dim }]} numberOfLines={1}>{sourceLine(a).text}</Text>}
                     {st && !prog[a.id] && <Text style={[s.appMeta, { color: C.accent }]}>{st}…</Text>}
                     {st && prog[a.id] && <ProgressBar p={prog[a.id]} stage={st} />}
                   </View>
@@ -417,6 +461,7 @@ function Main() {
         <Modal visible animationType="slide" onRequestClose={() => setDetail(null)}>
           <AppDetail repo={detail.repo} app={detail.app} repos={repos} icon={icons[detail.app.id]} have={installed[detail.app.id] ?? -1}
             stage={stage[detail.app.id]} prog={prog[detail.app.id]} onClose={() => setDetail(null)}
+            sources={sources} onChooseSource={(r) => chooseSource(r, detail.app)}
             onInstall={() => install(detail.repo, detail.app)} onCancel={cancellable(stage[detail.app.id]) ? () => cancelDownload(detail.app) : undefined} />
         </Modal>
       )}
@@ -502,8 +547,9 @@ const cidShort = (c?: string) => (c ? `${c.slice(0, 10)}…${c.slice(-6)}` : "�
 const keyShort = (k: string) => `${k.slice(0, 6)}…${k.slice(-4)}`;
 const certShort = (h?: string) => (h ? `${h.slice(0, 8)}…${h.slice(-8)}` : "not pinned");
 
-function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInstall, onCancel }: {
+function AppDetail({ repo, app, repos, icon, have, stage, prog, sources, onChooseSource, onClose, onInstall, onCancel }: {
   repo: R.Repo; app: R.App; repos: R.Repo[]; icon?: string; have: number; stage?: string; prog?: storage.Progress;
+  sources: R.Sources; onChooseSource: (r: R.Repo) => void;
   onClose: () => void; onInstall: () => void; onCancel?: () => void;
 }) {
   const v = app.versions[0];
@@ -516,7 +562,12 @@ function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInsta
   }, [app.id, have]);
   const sameKey = installedSigners && v.signer ? installedSigners.includes(v.signer) : null;
   const others = R.publishersOf(repos, app.id).filter((p) => p.repo.key !== repo.key);
-  const action = have < 0 ? "Install" : have < v.versionCode ? "Update" : null;
+  // ADR 0017: where this app installs and updates from
+  const listed = R.listedBy(repos, app.id);
+  const src = R.sourceState(app.id, listed, sources);
+  const srcKey = src.kind === "chosen" || src.kind === "only" ? src.repo : null;
+  const fromHere = have < 0 || srcKey === repo.key;
+  const action = have < 0 ? "Install" : have < v.versionCode ? (fromHere ? "Update" : "Get it from here") : null;
   return (
     <SafeAreaView style={s.root} edges={["top", "bottom"]}>
       <View style={s.head}>
@@ -559,6 +610,30 @@ function AppDetail({ repo, app, repos, icon, have, stage, prog, onClose, onInsta
               : `Also in "${o.repo.name}" (${o.versionName}), same signing key.`}
           </Text>
         ))}
+
+        {have >= 0 && (
+          <>
+            <Text style={s.section}>Where it updates from</Text>
+            <Text style={[s.kv, { color: src.kind === "ambiguous" || src.kind === "gone" ? C.err : C.dim }]}>
+              {src.kind === "chosen" || src.kind === "only"
+                ? `Only from "${repos.find((x) => x.key === src.repo)?.name}" (key ${keyShort(src.repo)}). Other repositories that list ${app.label} are ignored.`
+                : src.kind === "gone"
+                  ? `You chose a repository (key ${keyShort(src.repo)}) that no longer lists ${app.label}. It won't update until you choose another.`
+                  : src.kind === "ambiguous"
+                    ? `${listed.length} repositories list ${app.label}. It won't update until you choose one.`
+                    : `No repository lists ${app.label}.`}
+            </Text>
+            {listed.filter((k) => k !== srcKey).map((k) => {
+              const r = repos.find((x) => x.key === k)!; const a = r.index?.apps.find((x) => x.id === app.id);
+              return (
+                <View key={k} style={[s.row, { alignItems: "center", marginTop: 6 }]}>
+                  <Text style={[s.kv, { flex: 1 }]}>"{r.name}" · key {keyShort(r.key)}{a?.versions[0] ? ` · ${a.versions[0].versionName}` : ""}</Text>
+                  <Pressable style={s.btnGhost} onPress={() => onChooseSource(r)}><Text style={s.btnGhostT}>Use this one</Text></Pressable>
+                </View>
+              );
+            })}
+          </>
+        )}
 
         <Text style={s.section}>From Logos Storage</Text>
         <Text style={s.kv}>App list (index)  <Text style={s.kvV}>{cidShort(repo.loadedCid ?? repo.indexCid)}</Text></Text>
